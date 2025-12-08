@@ -14,27 +14,54 @@
 (defparameter *ranks* '("A" "K" "Q" "J" "T" "9" "8" "7" "6" "5" "4" "3" "2"))
 (defparameter *suits* '("H" "D" "C" "S"))
 
+; remaining cards in deck
+(defvar *deck* nil)  
+
+(defun make-deck ()
+  "Create a fresh shuffled deck"
+  (let ((cards nil))
+    (dolist (r *ranks*)
+      (dolist (s *suits*)
+        (push (format nil "~a~a" r s) cards)))
+    (setf *deck* (shuffle-list cards))))
+
+(defun shuffle-list (lst)
+  "Fisher-Yates shuffle"
+  (let ((vec (coerce lst 'vector)))
+    (loop for i from (1- (length vec)) downto 1
+          do (rotatef (aref vec i) (aref vec (random (1+ i)))))
+    (coerce vec 'list)))
+
+(defun deal-card ()
+  "Deal one card from deck"
+  (if *deck*
+      (pop *deck*)
+      (progn
+        (format t "~%WARNING: Deck empty, reshuffling~%")
+        (make-deck)
+        (pop *deck*))))
+
 ;; Table layout pixel coordinates
 (defparameter *layout*
   '(;; Opponent cards (top center)
     (:opponent-card1 :x 250 :y 80)
     (:opponent-card2 :x 350 :y 80)
-    
-    ;; Board cards (middle row)
-    (:discard :x 150 :y 220)
+
+    ;; Board cards (middle row) - y=220
     (:flop1 :x 250 :y 220)
     (:flop2 :x 330 :y 220)
     (:flop3 :x 410 :y 220)
     (:turn :x 490 :y 220)
     (:river :x 570 :y 220)
-    
-    ;; Player cards (bottom)
+
+    ;; Player cards (bottom) - y=360
     (:player-card1 :x 250 :y 360)
     (:player-card2 :x 350 :y 360)))
 
 (defvar *poker-window* nil)
-; Track what's been added
-(defvar *window-cards* nil)  
+(defvar *window-cards* nil)
+(defvar *game-stage* nil)  ; preflop, flop, turn, river, done
+(defvar *dealt-cards* nil) ; store all dealt cards
 
 (defun create-poker-window ()
   "Create poker table window"
@@ -46,20 +73,9 @@
                                          :y 50))
   (setf *window-cards* nil)
 
-  (add-text-to-exp-window *poker-window* "Opponent:" 
-                          :x 280 :y 50 :font-size 14 :color 'gray)
-  
-  ;; Board section  
-  (add-text-to-exp-window *poker-window* "Board:" 
-                          :x 150 :y 190 :font-size 14 :color 'gray)
-  (add-text-to-exp-window *poker-window* "|" 
-                          :x 220 :y 215 :font-size 24 :color 'gray)
-  (add-text-to-exp-window *poker-window* "|" 
-                          :x 640 :y 215 :font-size 24 :color 'gray)
-  
-  ;; Player section
-  (add-text-to-exp-window *poker-window* "You:" 
-                          :x 290 :y 330 :font-size 14 :color 'gray)
+  ;; Minimal labels - keep far from card search areas
+  ;; Player cards at y=360, board cards at y=220
+  ;; No labels in those zones to avoid visual confusion
   
   *poker-window*)
 
@@ -69,10 +85,8 @@
     (values (getf pos :x) (getf pos :y))))
 
 (defun random-card ()
-  "Generate random card"
-  (format nil "~a~a" 
-          (nth (random (length *ranks*)) *ranks*)
-          (nth (random (length *suits*)) *suits*)))
+  "Deal a card from the deck (no duplicates)"
+  (deal-card))
 
 (defun add-card-delayed (card-text x y)
   "Helper function for scheduled card addition"
@@ -106,50 +120,112 @@
                             :width 60 :height 40
                             :font-size 32 :color 'dark-gray)))
 
+(defun add-action-labels ()
+  "No visual labels - keeps display clean for model"
+  nil)
+
+(defun handle-keypress (model key)
+  "Handle keyboard input - advance game stage"
+  (declare (ignore model))
+  (format t "~%>>> Key pressed: ~a (stage: ~a)~%" key *game-stage*)
+  (cond
+    ;; Call at any stage
+    ((string-equal key "c")
+     (cond
+       ((eq *game-stage* 'preflop)
+        (setf *game-stage* 'flop)
+        (format t "Revealing flop...~%")
+        (reveal-flop))
+       ((eq *game-stage* 'flop)
+        (setf *game-stage* 'turn)
+        (format t "Revealing turn...~%")
+        (reveal-turn))
+       ((eq *game-stage* 'turn)
+        (setf *game-stage* 'river)
+        (format t "Revealing river...~%")
+        (reveal-river))
+       ((eq *game-stage* 'river)
+        (setf *game-stage* 'done)
+        (format t "Hand complete!~%"))))
+    ;; Fold at any time
+    ((string-equal key "f")
+     (setf *game-stage* 'done)
+     (format t "Player folded.~%"))
+    ;; Raise - for now treat same as call
+    ((string-equal key "r")
+     (format t "Raise! (treating as call for now)~%")
+     (handle-keypress model "c"))))
+
+(defun reveal-flop ()
+  "Reveal the 3 flop cards"
+  (let ((f1 (add-card-to-window :flop1))
+        (f2 (add-card-to-window :flop2))
+        (f3 (add-card-to-window :flop3)))
+    (push (list 'flop f1 f2 f3) *dealt-cards*)
+    (format t "Flop: ~a ~a ~a~%" f1 f2 f3)))
+
+(defun reveal-turn ()
+  "Reveal the turn card"
+  (let ((t1 (add-card-to-window :turn)))
+    (push (list 'turn t1) *dealt-cards*)
+    (format t "Turn: ~a~%" t1)))
+
+(defun reveal-river ()
+  "Reveal the river card"
+  (let ((r1 (add-card-to-window :river)))
+    (push (list 'river r1) *dealt-cards*)
+    (format t "River: ~a~%" r1)))
+
 (defun setup-table ()
-  "Setup poker table with placeholders"
+  "Setup poker table with placeholders and buttons"
   (create-poker-window)
-  
+  (setf *game-stage* 'preflop)
+  (setf *dealt-cards* nil)
+  (make-deck)  ; fresh shuffled deck
+
   ;; Add placeholders for hidden opponent cards
   (add-placeholder :opponent-card1)
   (add-placeholder :opponent-card2)
-  
-  ;; Add placeholder for discard
-  (add-placeholder :discard)
-  
-  ;; Board cards start hidden
-  (add-placeholder :flop1)
-  (add-placeholder :flop2)
-  (add-placeholder :flop3)
-  (add-placeholder :turn)
-  (add-placeholder :river))
+
+  ;; Board cards: NO placeholders - they appear when revealed
+  ;; This prevents model from finding "XX" instead of real cards
+
+  ;; Add key labels
+  (add-action-labels))
 
 (defun poker-trial ()
-  "One poker trial - deal 2 cards to player"
+  "One poker trial - full hand with flop/turn/river"
   (reset)
-  
+
   (unless (current-model)
     (error "No model loaded!"))
-  
+
   (format t "~%=== POKER TRIAL ===~%")
-  
+
   (setup-table)
-  
-  ;; Install for model
-  (install-device *poker-window*)
-  
-  ;; Deal player cards - immediately (can change in the future)
+
+  ;; Deal player cards BEFORE installing device
   (format t "Dealing player cards~%")
   (let ((card1 (add-card-to-window :player-card1 nil 0))
         (card2 (add-card-to-window :player-card2 nil 0)))
-    
-    (format t "Cards: ~a ~a~%" card1 card2)
-    
-    ;; Run model
-    (run 5)
-    
-    (format t "~%Trial complete: ~a and ~a~%" card1 card2)
-    (list card1 card2)))
+    (push (list 'hole card1 card2) *dealt-cards*)
+    (format t "Hole cards: ~a ~a~%" card1 card2)
+
+    ;; NOW install window for model (so it sees the cards)
+    (install-device *poker-window*)
+
+    ;; Register keypress handler
+    (add-act-r-command "poker-key-handler" 'handle-keypress
+                       "Handle poker keypresses")
+    (monitor-act-r-command "output-key" "poker-key-handler")
+
+    ;; Run model until game is done
+    (run 30)
+
+    (format t "~%=== HAND COMPLETE ===~%")
+    (format t "Final stage: ~a~%" *game-stage*)
+    (format t "All cards dealt: ~a~%" (reverse *dealt-cards*))
+    *dealt-cards*))
 
 (defun poker-experiment (&optional (n-trials 1))
   "Run multiple trials of the poker task"
