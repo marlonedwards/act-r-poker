@@ -33,7 +33,6 @@
     (coerce vec 'list)))
 
 (defun deal-card ()
-  "Deal one card from deck"
   (if *deck*
       (pop *deck*)
       (progn
@@ -121,11 +120,11 @@
                             :font-size 32 :color 'dark-gray)))
 
 (defun add-action-labels ()
-  "No visual labels - keeps display clean for model"
+  "Removed because model was attending to these instead of the cards"
   nil)
 
 (defun handle-keypress (model key)
-  "Handle keyboard input - advance game stage"
+  "Handle keyboard input - forward game stage"
   (declare (ignore model))
   (format t "~%>>> Key pressed: ~a (stage: ~a)~%" key *game-stage*)
   (cond
@@ -157,7 +156,6 @@
      (handle-keypress model "c"))))
 
 (defun reveal-flop ()
-  "Reveal the 3 flop cards"
   (let ((f1 (add-card-to-window :flop1))
         (f2 (add-card-to-window :flop2))
         (f3 (add-card-to-window :flop3)))
@@ -165,19 +163,16 @@
     (format t "Flop: ~a ~a ~a~%" f1 f2 f3)))
 
 (defun reveal-turn ()
-  "Reveal the turn card"
   (let ((t1 (add-card-to-window :turn)))
     (push (list 'turn t1) *dealt-cards*)
     (format t "Turn: ~a~%" t1)))
 
 (defun reveal-river ()
-  "Reveal the river card"
   (let ((r1 (add-card-to-window :river)))
     (push (list 'river r1) *dealt-cards*)
     (format t "River: ~a~%" r1)))
 
 (defun setup-table ()
-  "Setup poker table with placeholders and buttons"
   (create-poker-window)
   (setf *game-stage* 'preflop)
   (setf *dealt-cards* nil)
@@ -187,8 +182,8 @@
   (add-placeholder :opponent-card1)
   (add-placeholder :opponent-card2)
 
-  ;; Board cards: NO placeholders - they appear when revealed
-  ;; This prevents model from finding "XX" instead of real cards
+  ;; Board cards: have no placeholders when cards are not revealed
+  ;; We previously had "XX" instead of cards before we implemented deal function
 
   ;; Add key labels
   (add-action-labels))
@@ -204,7 +199,7 @@
 
   (setup-table)
 
-  ;; Deal player cards BEFORE installing device
+  ;; Deal player cards before  installing device
   (format t "Dealing player cards~%")
   (let ((card1 (add-card-to-window :player-card1 nil 0))
         (card2 (add-card-to-window :player-card2 nil 0)))
@@ -238,7 +233,7 @@
     (reverse results)))
 
 (defun test-layout ()
-  "Test the table layout with sample cards"
+  "Test the table layout with sample cards - VISUAL ERROR WHERE THE CARDS DO NOT CLEAR PLACEHOLDER WHEN DEALT - KNOWN ISSUE"
   (format t "~%Testing poker table layout~%")
   (setup-table)
   
