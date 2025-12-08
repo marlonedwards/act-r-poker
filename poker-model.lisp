@@ -20,10 +20,7 @@
        :lf 0
        :trace-detail high)
 
-  ;; ============================================
   ;; PREFLOP: Attend to hole cards, then click CALL
-  ;; ============================================
-
   ;; Ignore items outside player area (y <= 350)
   (p ignore-non-player-item
      =goal>
@@ -36,7 +33,7 @@
      ==>
      -visual-location>)
 
-  ;; Find first hole card (player cards at y=360, search wide range)
+  ;; Find first hole card (player cards at y = 360, search wide range)
   (p find-first-card
      =goal>
        isa poker-hand
@@ -82,7 +79,7 @@
        state waiting
      -visual>)
 
-  ;; Find second hole card
+  ;; Find second hole card, etc.
   (p find-second-card
      =goal>
        isa poker-hand
@@ -97,7 +94,6 @@
        :attended nil
        screen-y highest)
 
-  ;; Attend second hole card
   (p attend-second-card
      =goal>
        isa poker-hand
@@ -115,7 +111,6 @@
      =goal>
        state attending)
 
-  ;; Encode second hole card
   (p encode-second-card
      =goal>
        isa poker-hand
@@ -132,7 +127,6 @@
        state find-button
      -visual>)
 
-  ;; Press C to call
   (p press-call
      =goal>
        isa poker-hand
@@ -161,8 +155,6 @@
        state waiting)
 
   ;; FLOP: Attend to 3 new board cards (y ~ 220)
-
-  ;; After preflop call, wait for flop cards
   (p wait-for-flop
      =goal>
        isa poker-hand
@@ -178,8 +170,7 @@
        :attended nil
      =goal>
        stage flop)
-
-  ;; Attend flop card
+  
   (p attend-flop-card
      =goal>
        isa poker-hand
@@ -196,7 +187,6 @@
      =goal>
        state attending)
 
-  ;; Encode flop card (not last one)
   (p encode-flop-card
      =goal>
        isa poker-hand
@@ -214,7 +204,7 @@
        state waiting
      -visual>)
 
-  ;; Encode last flop card (3rd) -> find button
+  ;; Encode last flop card -> find button
   (p encode-last-flop-card
      =goal>
        isa poker-hand
@@ -232,7 +222,6 @@
        state find-button
      -visual>)
 
-  ;; Find next flop card
   (p find-next-flop-card
      =goal>
        isa poker-hand
@@ -246,7 +235,7 @@
      +visual-location>
        :attended nil)
 
-  ;; After flop call, wait for turn card
+  ;; Wait for turn card post flop
   (p wait-for-turn
      =goal>
        isa poker-hand
@@ -263,7 +252,6 @@
        stage turn
        board-attended 0)
 
-  ;; Attend turn card
   (p attend-turn-card
      =goal>
        isa poker-hand
@@ -280,7 +268,6 @@
      =goal>
        state attending)
 
-  ;; Encode turn card -> find button
   (p encode-turn-card
      =goal>
        isa poker-hand
@@ -294,8 +281,7 @@
        board-attended 1
        state find-button
      -visual>)
-     
-  ;; After turn call, wait for river card
+  
   (p wait-for-river
      =goal>
        isa poker-hand
@@ -311,7 +297,6 @@
        stage river
        board-attended 0)
 
-  ;; Attend river card
   (p attend-river-card
      =goal>
        isa poker-hand
@@ -328,7 +313,6 @@
      =goal>
        state attending)
 
-  ;; Encode river card -> find button
   (p encode-river-card
      =goal>
        isa poker-hand
@@ -344,7 +328,6 @@
      -visual>)
 
   ;; status DONE: After river call
-
   (p hand-complete
      =goal>
        isa poker-hand
