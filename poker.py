@@ -194,39 +194,322 @@ def card_rank(card):
                 '4': 4, '3': 3, '2': 2}
     return rank_map.get(card[0], 0)
 
+def card_suit(card):
+    """Get suit of card"""
+    return card[1] if len(card) > 1 else None
+
+
+# ============================================
+# FULL POKER HAND EVALUATOR
+# ============================================
+
+# Hand rankings (higher = better)
+HAND_RANKS = {
+    'high_card': 1,
+    'pair': 2,
+    'two_pair': 3,
+    'three_of_a_kind': 4,
+    'straight': 5,
+    'flush': 6,
+    'full_house': 7,
+    'four_of_a_kind': 8,
+    'straight_flush': 9,
+    'royal_flush': 10
+}
+
+
+def get_all_cards(hole_cards, board):
+    """Combine hole cards and board into a single list"""
+    all_cards = list(hole_cards) if hole_cards else []
+    if board:
+        all_cards.extend(board)
+    return all_cards
+
+
+def count_ranks(cards):
+    """Count occurrences of each rank"""
+    counts = {}
+    for card in cards:
+        r = card_rank(card)
+        counts[r] = counts.get(r, 0) + 1
+    return counts
+
+
+def count_suits(cards):
+    """Count occurrences of each suit"""
+    counts = {}
+    for card in cards:
+        s = card_suit(card)
+        counts[s] = counts.get(s, 0) + 1
+    return counts
+
+
+def has_flush(cards):
+    """Check if there's a flush (5+ cards of same suit)"""
+    suit_counts = count_suits(cards)
+    for suit, count in suit_counts.items():
+        if count >= 5:
+            # Return the flush cards sorted by rank
+            flush_cards = [c for c in cards if card_suit(c) == suit]
+            flush_cards.sort(key=lambda c: card_rank(c), reverse=True)
+            return flush_cards[:5]
+    return None
+
+
+def has_straight(cards):
+    """Check if there's a straight (5 consecutive ranks)"""
+    ranks = sorted(set(card_rank(c) for c in cards), reverse=True)
+
+    # Check for A-2-3-4-5 (wheel)
+    if 14 in ranks and 2 in ranks and 3 in ranks and 4 in ranks and 5 in ranks:
+        return [5, 4, 3, 2, 14]  # Wheel, 5-high straight
+
+    # Check for regular straights
+    for i in range(len(ranks) - 4):
+        if ranks[i] - ranks[i+4] == 4:
+            # Found 5 consecutive ranks
+            straight_high = ranks[i]
+            return list(range(straight_high, straight_high - 5, -1))
+
+    return None
+
+
+def has_straight_flush(cards):
+    """Check for straight flush (straight + flush in same suit)"""
+    suit_counts = count_suits(cards)
+    for suit, count in suit_counts.items():
+        if count >= 5:
+            suited_cards = [c for c in cards if card_suit(c) == suit]
+            straight = has_straight(suited_cards)
+            if straight:
+                return straight
+    return None
+
+
+def evaluate_made_hand(cards):
+    """
+    Evaluate the best 5-card hand from available cards.
+    Returns (hand_type, hand_rank, kickers)
+    """
+    if len(cards) < 5:
+        # Not enough cards for a full hand evaluation
+        return ('high_card', 1, sorted([card_rank(c) for c in cards], reverse=True))
+
+    rank_counts = count_ranks(cards)
+    ranks_by_count = {}
+    for rank, count in rank_counts.items():
+        if count not in ranks_by_count:
+            ranks_by_count[count] = []
+        ranks_by_count[count].append(rank)
+
+    # Sort each count group by rank (highest first)
+    for count in ranks_by_count:
+        ranks_by_count[count].sort(reverse=True)
+
+    # Check for straight flush / royal flush
+    sf = has_straight_flush(cards)
+    if sf:
+        if sf[0] == 14:  # A-high straight flush = royal flush
+            return ('royal_flush', 10, sf)
+        return ('straight_flush', 9, sf)
+
+    # Check for four of a kind
+    if 4 in ranks_by_count:
+        quad_rank = ranks_by_count[4][0]
+        kicker = max(r for r in rank_counts.keys() if r != quad_rank)
+        return ('four_of_a_kind', 8, [quad_rank, kicker])
+
+    # Check for full house
+    if 3 in ranks_by_count and (2 in ranks_by_count or len(ranks_by_count.get(3, [])) > 1):
+        trip_rank = ranks_by_count[3][0]
+        if len(ranks_by_count.get(3, [])) > 1:
+            pair_rank = ranks_by_count[3][1]  # Second trips as pair
+        else:
+            pair_rank = ranks_by_count[2][0]
+        return ('full_house', 7, [trip_rank, pair_rank])
+
+    # Check for flush
+    flush = has_flush(cards)
+    if flush:
+        return ('flush', 6, [card_rank(c) for c in flush])
+
+    # Check for straight
+    straight = has_straight(cards)
+    if straight:
+        return ('straight', 5, straight)
+
+    # Check for three of a kind
+    if 3 in ranks_by_count:
+        trip_rank = ranks_by_count[3][0]
+        kickers = sorted([r for r in rank_counts.keys() if r != trip_rank], reverse=True)[:2]
+        return ('three_of_a_kind', 4, [trip_rank] + kickers)
+
+    # Check for two pair
+    if 2 in ranks_by_count and len(ranks_by_count[2]) >= 2:
+        pairs = ranks_by_count[2][:2]
+        kicker = max(r for r in rank_counts.keys() if r not in pairs)
+        return ('two_pair', 3, pairs + [kicker])
+
+    # Check for one pair
+    if 2 in ranks_by_count:
+        pair_rank = ranks_by_count[2][0]
+        kickers = sorted([r for r in rank_counts.keys() if r != pair_rank], reverse=True)[:3]
+        return ('pair', 2, [pair_rank] + kickers)
+
+    # High card
+    kickers = sorted(rank_counts.keys(), reverse=True)[:5]
+    return ('high_card', 1, kickers)
+
+
+def count_flush_draw(cards):
+    """Count cards toward a flush (returns max suited count)"""
+    suit_counts = count_suits(cards)
+    return max(suit_counts.values()) if suit_counts else 0
+
+
+def count_straight_draw(cards):
+    """
+    Check for straight draws.
+    Returns: 'oesd' (open-ended), 'gutshot', or None
+    """
+    ranks = sorted(set(card_rank(c) for c in cards))
+
+    # Check for open-ended straight draw (4 consecutive)
+    for i in range(len(ranks) - 3):
+        if ranks[i+3] - ranks[i] == 3:
+            # 4 consecutive cards
+            # Check if it's open-ended (not at edges)
+            if ranks[i] > 2 and ranks[i+3] < 14:
+                return 'oesd'
+
+    # Check for gutshot (4 cards with one gap)
+    for i in range(len(ranks) - 3):
+        if ranks[i+3] - ranks[i] == 4:
+            # Could be a gutshot (one gap in 5 cards)
+            return 'gutshot'
+
+    # Check for wheel draw (A-2-3-4 or similar)
+    wheel_ranks = [14, 2, 3, 4, 5]
+    wheel_count = sum(1 for r in ranks if r in wheel_ranks)
+    if wheel_count >= 4:
+        return 'oesd' if wheel_count == 4 else None
+
+    return None
+
+
 def evaluate_hand_strength(hole_cards, board):
-    """Evaluate hand strength: high, medium, low"""
+    """Evaluate hand strength: high, medium, low
+
+    Uses full poker hand evaluation when board is available.
+    Considers made hands, draws, and position.
+    """
     if not hole_cards:
         return 'low'
 
     r1 = card_rank(hole_cards[0])
     r2 = card_rank(hole_cards[1]) if len(hole_cards) > 1 else 0
+    high_card = max(r1, r2)
+    low_card = min(r1, r2)
     is_pair = r1 == r2
     is_suited = len(hole_cards) > 1 and hole_cards[0][1] == hole_cards[1][1]
+    gap = high_card - low_card
 
-    # Check for pairs with board
-    board_matches = 0
-    if board:
-        for bc in board:
-            bcr = card_rank(bc)
-            if bcr == r1 or bcr == r2:
-                board_matches += 1
+    # === POSTFLOP: Use full hand evaluation ===
+    if board and len(board) >= 3:
+        all_cards = get_all_cards(hole_cards, board)
+        hand_type, hand_rank, kickers = evaluate_made_hand(all_cards)
 
-    if board_matches >= 2:
+        # Check for draws (important for decision making)
+        flush_count = count_flush_draw(all_cards)
+        straight_draw = count_straight_draw(all_cards)
+
+        # HIGH: Strong made hands
+        if hand_rank >= 6:  # Flush or better
+            return 'high'
+        if hand_type == 'straight':
+            return 'high'
+        if hand_type == 'three_of_a_kind':
+            return 'high'
+        if hand_type == 'two_pair':
+            # Two pair strength depends on the pairs
+            if kickers[0] >= 10:  # Top pair is T or higher
+                return 'high'
+            return 'medium'
+
+        # MEDIUM: Decent made hands or strong draws
+        if hand_type == 'pair':
+            pair_rank = kickers[0]
+            # Top pair or overpair
+            board_ranks = [card_rank(c) for c in board]
+            max_board = max(board_ranks)
+            if pair_rank >= max_board:  # Overpair or top pair
+                if pair_rank >= 10:
+                    return 'high'
+                return 'medium'
+            # Second pair or pocket pair below top card
+            if pair_rank >= max_board - 2:  # Within 2 ranks of top board card
+                return 'medium'
+            # Any pair with decent kicker (using hole cards)
+            if high_card >= 10:  # Our high card is T+
+                return 'medium'
+            # Small pairs are still playable in heads-up
+            if pair_rank >= 5:
+                return 'medium'
+            return 'low'
+
+        # Strong draws count as medium
+        if flush_count >= 4:  # Flush draw
+            return 'medium'
+        if straight_draw == 'oesd':  # Open-ended straight draw
+            return 'medium'
+
+        # High card hands
+        if hand_type == 'high_card':
+            # Check if we have overcards to the board
+            board_high = max(card_rank(c) for c in board)
+            if high_card > board_high and low_card > board_high:
+                return 'medium'  # Two overcards
+            if high_card > board_high and high_card >= 12:
+                return 'medium'  # One strong overcard
+            # Gutshot with overcards
+            if straight_draw == 'gutshot' and high_card > board_high:
+                return 'medium'
+            return 'low'
+
+        return 'low'
+
+    # === PREFLOP EVALUATION (more generous for heads-up) ===
+
+    # HIGH: Premium hands
+    if is_pair and r1 >= 9:  # 99+ is high
         return 'high'
-    if board_matches == 1:
+    if high_card == 14 and low_card >= 10:  # AT+ is high
+        return 'high'
+    if high_card == 14 and is_suited:  # Any suited Ace is high
+        return 'high'
+    if high_card >= 13 and low_card >= 12:  # KQ+ is high
+        return 'high'
+
+    # MEDIUM: Playable hands
+    if is_pair:  # Any pair is medium
+        return 'medium'
+    if high_card == 14:  # Any Ace is at least medium
+        return 'medium'
+    if high_card == 13 and low_card >= 8:  # K8+ is medium
+        return 'medium'
+    if high_card == 13 and is_suited:  # Any suited King is medium
+        return 'medium'
+    if high_card >= 10 and low_card >= 10:  # Two Broadway cards
+        return 'medium'
+    if is_suited and gap <= 2 and low_card >= 5:  # Suited connectors 56s+
+        return 'medium'
+    if is_suited and high_card >= 10:  # Suited with a Broadway card
+        return 'medium'
+    if high_card == 12 and low_card >= 8:  # Q8+ is medium
         return 'medium'
 
-    # Preflop evaluation
-    if is_pair and r1 >= 10:
-        return 'high'
-    if r1 >= 14 and r2 >= 12:
-        return 'high'
-    if is_pair:
-        return 'medium'
-    if is_suited and min(r1, r2) >= 10:
-        return 'medium'
-    if r1 >= 10 and r2 >= 10:
+    # LOW: Marginal/trash - but still check for some playability
+    if high_card >= 9 and low_card >= 7:  # Connected high cards
         return 'medium'
 
     return 'low'
@@ -300,26 +583,77 @@ def show_feedback(window, result, outcome_text, opp_action='call'):
     actr.mod_focus('stage', 'done', 'state', 'processing-feedback',
                    'result', result_chunk, 'opp-action', opp_chunk)
 
+def compare_hands(hand1_eval, hand2_eval):
+    """
+    Compare two hand evaluations.
+    Returns: 1 if hand1 wins, -1 if hand2 wins, 0 if tie
+    """
+    type1, rank1, kickers1 = hand1_eval
+    type2, rank2, kickers2 = hand2_eval
+
+    # Compare hand ranks first
+    if rank1 > rank2:
+        return 1
+    elif rank2 > rank1:
+        return -1
+
+    # Same hand rank - compare kickers
+    for k1, k2 in zip(kickers1, kickers2):
+        if k1 > k2:
+            return 1
+        elif k2 > k1:
+            return -1
+
+    return 0  # Tie
+
+
 def determine_winner(player_cards, opponent_cards, board):
-    """Determine hand winner (simplified)"""
-    player_strength = evaluate_hand_strength(player_cards, board)
-    opponent_strength = evaluate_hand_strength(opponent_cards, board)
+    """Determine hand winner using full poker hand evaluation"""
+    # Get all cards for each player
+    player_all = get_all_cards(player_cards, board)
+    opponent_all = get_all_cards(opponent_cards, board)
 
-    strength_rank = {'high': 3, 'medium': 2, 'low': 1}
+    # Evaluate both hands
+    player_eval = evaluate_made_hand(player_all)
+    opponent_eval = evaluate_made_hand(opponent_all)
 
-    if strength_rank[player_strength] > strength_rank[opponent_strength]:
+    # Compare
+    result = compare_hands(player_eval, opponent_eval)
+
+    if result > 0:
         return 'player'
-    elif strength_rank[opponent_strength] > strength_rank[player_strength]:
+    elif result < 0:
         return 'opponent'
+    return 'tie'
+
+
+def get_hand_description(cards):
+    """Get a human-readable description of the best hand"""
+    hand_type, rank, kickers = evaluate_made_hand(cards)
+
+    rank_names = {14: 'A', 13: 'K', 12: 'Q', 11: 'J', 10: 'T',
+                  9: '9', 8: '8', 7: '7', 6: '6', 5: '5', 4: '4', 3: '3', 2: '2'}
+
+    if hand_type == 'royal_flush':
+        return 'Royal Flush'
+    elif hand_type == 'straight_flush':
+        return f'Straight Flush ({rank_names.get(kickers[0], kickers[0])}-high)'
+    elif hand_type == 'four_of_a_kind':
+        return f'Four {rank_names.get(kickers[0], kickers[0])}s'
+    elif hand_type == 'full_house':
+        return f'Full House ({rank_names.get(kickers[0], kickers[0])}s full of {rank_names.get(kickers[1], kickers[1])}s)'
+    elif hand_type == 'flush':
+        return f'Flush ({rank_names.get(kickers[0], kickers[0])}-high)'
+    elif hand_type == 'straight':
+        return f'Straight ({rank_names.get(kickers[0], kickers[0])}-high)'
+    elif hand_type == 'three_of_a_kind':
+        return f'Three {rank_names.get(kickers[0], kickers[0])}s'
+    elif hand_type == 'two_pair':
+        return f'Two Pair ({rank_names.get(kickers[0], kickers[0])}s and {rank_names.get(kickers[1], kickers[1])}s)'
+    elif hand_type == 'pair':
+        return f'Pair of {rank_names.get(kickers[0], kickers[0])}s'
     else:
-        # Tie - compare high cards
-        p_high = max(card_rank(player_cards[0]), card_rank(player_cards[1]))
-        o_high = max(card_rank(opponent_cards[0]), card_rank(opponent_cards[1]))
-        if p_high > o_high:
-            return 'player'
-        elif o_high > p_high:
-            return 'opponent'
-        return 'tie'
+        return f'High Card ({rank_names.get(kickers[0], kickers[0])})' if kickers else 'High Card'
 
 def run_hand(visible=False):
     """Run a single poker hand"""
@@ -378,6 +712,7 @@ def run_hand(visible=False):
     # Set goal for model with all game state - model no longer uses visual attention for this
     # Reset learned flag to nil so model can learn this hand
     # Reset result, opp-action, opp-card1, opp-card2 for new hand
+    # Also reset action history slots for Improvement #5
     actr.mod_focus('stage', 'preflop', 'state', 'waiting', 'strength', initial_strength,
                    'card1', game.player_cards[0], 'card2', game.player_cards[1],
                    'rank1', rank1, 'rank2', rank2, 'suited', suited_str,
@@ -385,12 +720,22 @@ def run_hand(visible=False):
                    'pot-amount', game.pot,
                    'learned', 'nil', 'result', 'nil', 'opp-action', 'nil',
                    'opp-card1', 'nil', 'opp-card2', 'nil', 'my-action', 'nil',
-                   'hand-category', 'nil')
+                   'hand-category', 'nil',
+                   # Action history (Improvement #5)
+                   'opp-preflop-action', 'nil', 'opp-flop-action', 'nil', 'opp-turn-action', 'nil',
+                   'my-preflop-action', 'nil', 'my-flop-action', 'nil', 'my-turn-action', 'nil')
 
     hand_result = None
     player_folded = False
     opponent_folded = False
     opponent_action = 'call'  # Track last opponent action for learning
+
+    # Track action history for pattern detection (Improvement #5)
+    action_history = {
+        'my_preflop': None, 'opp_preflop': None,
+        'my_flop': None, 'opp_flop': None,
+        'my_turn': None, 'opp_turn': None
+    }
 
     # Game loop through stages
     stages = ['preflop', 'flop', 'turn', 'river']
@@ -408,30 +753,45 @@ def run_hand(visible=False):
             # Evaluate hand strength with flop
             flop_strength = evaluate_hand_strength(game.player_cards, game.board)
             print(f"  [DEBUG] Flop strength: {flop_strength} | Board: {game.board}")
-            # Signal model with updated game state
+            # Signal model with updated game state + action history
             actr.mod_focus('stage', 'flop', 'state', 'waiting', 'strength', flop_strength,
                            'my-chips', game.player_chips, 'opp-chips', game.opponent_chips,
-                           'pot-amount', game.pot)
+                           'pot-amount', game.pot,
+                           # Pass preflop action history (Improvement #5)
+                           'opp-preflop-action', action_history['opp_preflop'] or 'nil',
+                           'my-preflop-action', action_history['my_preflop'] or 'nil')
         elif stage == 'turn':
             game.board.append(game.deal_card())
             add_card_to_window(game.window, game.board[3], 'turn')
             # Evaluate hand strength with turn
             turn_strength = evaluate_hand_strength(game.player_cards, game.board)
             print(f"  [DEBUG] Turn strength: {turn_strength} | Board: {game.board}")
-            # Signal model with updated game state
+            # Signal model with updated game state + action history
             actr.mod_focus('stage', 'turn', 'state', 'waiting', 'strength', turn_strength,
                            'my-chips', game.player_chips, 'opp-chips', game.opponent_chips,
-                           'pot-amount', game.pot)
+                           'pot-amount', game.pot,
+                           # Pass preflop + flop action history (Improvement #5)
+                           'opp-preflop-action', action_history['opp_preflop'] or 'nil',
+                           'my-preflop-action', action_history['my_preflop'] or 'nil',
+                           'opp-flop-action', action_history['opp_flop'] or 'nil',
+                           'my-flop-action', action_history['my_flop'] or 'nil')
         elif stage == 'river':
             game.board.append(game.deal_card())
             add_card_to_window(game.window, game.board[4], 'river')
             # Evaluate hand strength with river
             river_strength = evaluate_hand_strength(game.player_cards, game.board)
             print(f"  [DEBUG] River strength: {river_strength} | Board: {game.board}")
-            # Signal model with updated game state
+            # Signal model with updated game state + action history
             actr.mod_focus('stage', 'river', 'state', 'waiting', 'strength', river_strength,
                            'my-chips', game.player_chips, 'opp-chips', game.opponent_chips,
-                           'pot-amount', game.pot)
+                           'pot-amount', game.pot,
+                           # Pass full action history (Improvement #5)
+                           'opp-preflop-action', action_history['opp_preflop'] or 'nil',
+                           'my-preflop-action', action_history['my_preflop'] or 'nil',
+                           'opp-flop-action', action_history['opp_flop'] or 'nil',
+                           'my-flop-action', action_history['my_flop'] or 'nil',
+                           'opp-turn-action', action_history['opp_turn'] or 'nil',
+                           'my-turn-action', action_history['my_turn'] or 'nil')
 
         # Wait for model response
         actr.run(10)
@@ -454,6 +814,25 @@ def run_hand(visible=False):
 
         # Record the action pair
         game.record_action(stage, player_action, opponent_action)
+
+        # IMPROVEMENT #5: Store action history for pattern detection
+        opp_action_chunk = f"{opponent_action}-action"
+        my_action_chunk = {'r': 'raise-action', 'c': 'call-action', 'f': 'fold-action'}.get(player_action, 'call-action')
+        if stage == 'preflop':
+            action_history['opp_preflop'] = opp_action_chunk
+            action_history['my_preflop'] = my_action_chunk
+        elif stage == 'flop':
+            action_history['opp_flop'] = opp_action_chunk
+            action_history['my_flop'] = my_action_chunk
+        elif stage == 'turn':
+            action_history['opp_turn'] = opp_action_chunk
+            action_history['my_turn'] = my_action_chunk
+
+        # IMPROVEMENT #4: Tell model what opponent did so it can learn per-stage
+        actr.mod_focus('opp-action', opp_action_chunk, 'my-action', my_action_chunk,
+                       'state', 'learning-stage')
+        # Let model learn this stage's interaction
+        actr.run(0.5)
 
         if opponent_action == 'fold':
             opponent_folded = True
