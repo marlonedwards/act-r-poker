@@ -30,9 +30,15 @@
     my-flop-action           ; what we did on flop
     my-turn-action           ; what we did on turn
     opp-card1 opp-card2      ; opponent's revealed cards
+    opp-rank1 opp-rank2      ; opponent's card ranks (for memory)
+    opp-suited               ; opponent's cards suited?
     opp-cards-attended       ; count of opponent cards attended
     result                   ; win, lose, fold
-    learned                  ; flag to prevent double learning
+    learned                  ; flag to prevent double learning (opponent-behavior)
+    learned-outcome          ; flag to prevent double hand-outcome learning
+    learned-showdown         ; flag to prevent double opponent-showdown learning
+    ;; Position tracking
+    position                 ; sb (small blind) or bb (big blind)
     my-chips opp-chips pot-amount)
 
   (chunk-type starting-hand
@@ -46,7 +52,19 @@
     stage my-action opp-response)
 
   (chunk-type hand-outcome
-    my-strength my-action result)
+    stage                    ; what stage this happened
+    my-strength              ; our hand strength
+    my-action                ; what we did
+    opp-action               ; what opponent did
+    result)                  ; outcome: win, lose, tie
+
+  ;; Opponent showdown memory - remember what hands they show down
+  (chunk-type opponent-showdown
+    rank1 rank2              ; opponent's hole card ranks
+    suited                   ; yes/no
+    stage                    ; how far the hand went
+    opp-action-pattern       ; were they aggressive or passive?
+    result)                  ; did they win or lose?
 
   ;; ============================================
   ;; CHUNKS
@@ -55,13 +73,15 @@
   (define-chunks
     (waiting) (checking-opponent) (retrieving-hand) (retrieving-opponent) (deciding)
     (pressing-key) (action-done) (attending-showdown) (attending)
-    (processing-feedback) (done) (learning-stage)
+    (processing-feedback) (done) (learning-stage) (checking-history)
     (preflop) (flop) (turn) (river) (showdown)
     (premium) (strong) (playable) (marginal) (trash) (exploit) (unknown) (probe)
     (yes) (no)
-    (high) (medium) (low)  ;; Hand strength values
+    (strength-high) (strength-medium) (strength-low)  ;; Hand strength values
     (fold-action) (call-action) (raise-action)
     (win) (lose) (tie)
+    (sb) (bb)              ;; Position values: small blind, big blind
+    (aggressive) (passive) ;; Opponent action patterns
     ;; Pre-define card chunks to avoid "Creating chunk with no slots" warnings
     ;; Hearts
     (2H) (3H) (4H) (5H) (6H) (7H) (8H) (9H) (TH) (JH) (QH) (KH) (AH)
@@ -72,9 +92,11 @@
     ;; Spades
     (2S) (3S) (4S) (5S) (6S) (7S) (8S) (9S) (TS) (JS) (QS) (KS) (AS))
 
+  ;; Buffer usage declarations - using :all since clear productions now test all slots
   (declare-buffer-usage goal poker-hand :all)
   (declare-buffer-usage imaginal opponent-behavior :all)
   (declare-buffer-usage imaginal hand-outcome :all)
+  (declare-buffer-usage imaginal opponent-showdown :all)
   (install-device '("motor" "keyboard"))
 
   ;; ============================================
@@ -183,7 +205,7 @@
        isa poker-hand
        state checking-opponent
        stage preflop
-       strength high
+       strength strength-high
      ?retrieval>
        buffer failure
      ?manual>
@@ -203,7 +225,7 @@
        isa poker-hand
        state checking-opponent
        stage preflop
-       strength medium
+       strength strength-medium
      ?retrieval>
        buffer failure
      ?manual>
@@ -223,7 +245,7 @@
        isa poker-hand
        state checking-opponent
        stage preflop
-       strength low
+       strength strength-low
        rank1 =r1
        rank2 =r2
        suited =s
@@ -345,7 +367,7 @@
        state retrieving-hand
        stage preflop
        rank1 =r1
-       strength high
+       strength strength-high
      =retrieval>
        isa starting-hand
      - rank1 =r1
@@ -368,7 +390,7 @@
        state retrieving-hand
        stage preflop
        rank1 =r1
-       strength medium
+       strength strength-medium
      =retrieval>
        isa starting-hand
      - rank1 =r1
@@ -391,7 +413,7 @@
        state retrieving-hand
        stage preflop
        rank1 =r1
-       strength low
+       strength strength-low
      =retrieval>
        isa starting-hand
      - rank1 =r1
@@ -415,7 +437,7 @@
        stage preflop
        rank1 =r1
        rank2 =r2
-       strength high
+       strength strength-high
      =retrieval>
        isa starting-hand
        rank1 =r1
@@ -440,7 +462,7 @@
        stage preflop
        rank1 =r1
        rank2 =r2
-       strength medium
+       strength strength-medium
      =retrieval>
        isa starting-hand
        rank1 =r1
@@ -465,7 +487,7 @@
        stage preflop
        rank1 =r1
        rank2 =r2
-       strength low
+       strength strength-low
      =retrieval>
        isa starting-hand
        rank1 =r1
@@ -488,7 +510,7 @@
        isa poker-hand
        state retrieving-hand
        stage preflop
-       strength high
+       strength strength-high
      ?retrieval>
        buffer failure
      ?manual>
@@ -508,7 +530,7 @@
        isa poker-hand
        state retrieving-hand
        stage preflop
-       strength medium
+       strength strength-medium
      ?retrieval>
        buffer failure
      ?manual>
@@ -528,7 +550,7 @@
        isa poker-hand
        state retrieving-hand
        stage preflop
-       strength low
+       strength strength-low
      ?retrieval>
        buffer failure
      ?manual>
@@ -550,7 +572,7 @@
        isa poker-hand
        state retrieving-hand
        stage preflop
-       strength low
+       strength strength-low
        pot-amount =pot
      !eval! (and (numberp =pot) (>= =pot 30))  ;; Pot has decent odds
      ?retrieval>
@@ -566,6 +588,208 @@
      +manual>
        cmd press-key
        key "c")
+
+  ;; ============================================
+  ;; POSITION-AWARE PREFLOP DECISIONS
+  ;; ============================================
+  ;; SB (small blind) acts first preflop - should be tighter
+  ;; BB (big blind) acts last preflop - can defend wider
+
+  ;; SB with marginal hand = fold (out of position, tighter range)
+  (p preflop-sb-fold-marginal
+     =goal>
+       isa poker-hand
+       state retrieving-hand
+       stage preflop
+       position sb
+       strength strength-low
+     ?retrieval>
+       buffer failure
+     ?manual>
+       state free
+     ==>
+     !output! (SB position with weak hand - FOLDING out of position)
+     =goal>
+       state pressing-key
+       my-action fold-action
+       hand-category trash
+     +manual>
+       cmd press-key
+       key "f")
+
+  ;; SB with medium hand = raise or fold (don't limp from SB)
+  (p preflop-sb-raise-medium
+     =goal>
+       isa poker-hand
+       state retrieving-hand
+       stage preflop
+       position sb
+       strength strength-medium
+     ?retrieval>
+       buffer failure
+     ?manual>
+       state free
+     ==>
+     !output! (SB position with medium hand - RAISING to take initiative)
+     =goal>
+       state pressing-key
+       my-action raise-action
+       hand-category playable
+     +manual>
+       cmd press-key
+       key "r")
+
+  ;; BB defend with wider range (already invested, closing the action)
+  (p preflop-bb-defend-medium
+     =goal>
+       isa poker-hand
+       state retrieving-hand
+       stage preflop
+       position bb
+       strength strength-medium
+     ?retrieval>
+       buffer failure
+     ?manual>
+       state free
+     ==>
+     !output! (BB position with medium hand - CALLING to defend blind)
+     =goal>
+       state pressing-key
+       my-action call-action
+       hand-category playable
+     +manual>
+       cmd press-key
+       key "c")
+
+  ;; BB can defend weak hands with good pot odds
+  (p preflop-bb-defend-weak
+     =goal>
+       isa poker-hand
+       state retrieving-hand
+       stage preflop
+       position bb
+       strength strength-low
+       pot-amount =pot
+     !eval! (and (numberp =pot) (>= =pot 30))
+     ?retrieval>
+       buffer failure
+     ?manual>
+       state free
+     ==>
+     !output! (BB defending weak hand with pot odds =pot)
+     =goal>
+       state pressing-key
+       my-action call-action
+       hand-category marginal
+     +manual>
+       cmd press-key
+       key "c")
+
+  ;; ============================================
+  ;; HAND-OUTCOME HISTORY CHECK
+  ;; ============================================
+  ;; Before making medium-strength decisions, check past outcomes
+
+  ;; When deciding with medium hand, first check our history
+  (p check-medium-hand-history
+     =goal>
+       isa poker-hand
+       state deciding
+       strength strength-medium
+       stage =stage
+     - stage preflop
+     ?retrieval>
+       buffer empty
+     ==>
+     !output! (Medium hand - checking outcome history for =stage)
+     =goal>
+       state checking-history
+     +retrieval>
+       isa hand-outcome
+       stage =stage
+       my-strength strength-medium
+     - result nil)
+
+  ;; History shows calling medium hands wins - call
+  (p history-medium-call-wins
+     =goal>
+       isa poker-hand
+       state checking-history
+       strength strength-medium
+     =retrieval>
+       isa hand-outcome
+       my-strength strength-medium
+       my-action call-action
+       result win
+     ?manual>
+       state free
+     ==>
+     !output! (History - calling medium hands has won - CALLING)
+     =goal>
+       state pressing-key
+       my-action call-action
+     +manual>
+       cmd press-key
+       key "c"
+     -retrieval>)
+
+  ;; History shows folding medium hands was right - fold
+  (p history-medium-fold-wins
+     =goal>
+       isa poker-hand
+       state checking-history
+       strength strength-medium
+     =retrieval>
+       isa hand-outcome
+       my-strength strength-medium
+       my-action fold-action
+       result win
+     ?manual>
+       state free
+     ==>
+     !output! (History - folding medium hands was correct - FOLDING)
+     =goal>
+       state pressing-key
+       my-action fold-action
+     +manual>
+       cmd press-key
+       key "f"
+     -retrieval>)
+
+  ;; History shows raising medium hands loses - be cautious, call
+  (p history-medium-raise-loses
+     =goal>
+       isa poker-hand
+       state checking-history
+       strength strength-medium
+     =retrieval>
+       isa hand-outcome
+       my-strength strength-medium
+       my-action raise-action
+       result lose
+     ?manual>
+       state free
+     ==>
+     !output! (History - raising medium hands lost - being cautious CALLING)
+     =goal>
+       state pressing-key
+       my-action call-action
+     +manual>
+       cmd press-key
+       key "c"
+     -retrieval>)
+
+  ;; No history found - fall back to default deciding state
+  (p history-check-failed
+     =goal>
+       isa poker-hand
+       state checking-history
+     ?retrieval>
+       buffer failure
+     ==>
+     !output! (No relevant history found - using default strategy)
+     =goal>
+       state deciding)
 
   ;; ============================================
   ;; POST-FLOP DECISIONS
@@ -602,6 +826,118 @@
        state deciding)
 
   ;; ============================================
+  ;; CALLING STATION EXPLOITATION
+  ;; ============================================
+  ;; When opponent ONLY calls (never raises, never folds), adjust strategy:
+  ;; - Value bet more with medium+ hands (they call with worse)
+  ;; - Don't bluff (they never fold)
+  ;; - Don't fold weak hands postflop (no threat, free showdowns)
+
+  ;; Against passive opponent (only calls), value bet medium hands
+  (p calling-station-value-bet-medium
+     =goal>
+       isa poker-hand
+       state deciding
+       strength strength-medium
+       stage =stage
+     - stage preflop
+       opp-preflop-action call-action   ;; They just called preflop
+     =retrieval>
+       isa opponent-behavior
+       opp-response call-action         ;; And they call now too
+     ?manual>
+       state free
+     ==>
+     !output! (EXPLOIT - Opponent is passive caller - VALUE BETTING medium hand)
+     =goal>
+       state pressing-key
+       my-action raise-action
+     +manual>
+       cmd press-key
+       key "r"
+     -retrieval>)
+
+  ;; Against passive opponent, don't fold weak hands postflop - check it down
+  (p calling-station-check-down-weak
+     =goal>
+       isa poker-hand
+       state deciding
+       strength strength-low
+       stage =stage
+     - stage preflop
+       opp-preflop-action call-action   ;; Opponent passive preflop
+     =retrieval>
+       isa opponent-behavior
+       opp-response call-action         ;; And they call now too
+     ?manual>
+       state free
+     ==>
+     !output! (EXPLOIT - Opponent is passive caller - CHECKING DOWN weak hand for showdown)
+     =goal>
+       state pressing-key
+       my-action call-action            ;; Check = call in our model
+     +manual>
+       cmd press-key
+       key "c"
+     -retrieval>)
+
+  ;; ============================================
+  ;; AGGRESSIVE OPPONENT EXPLOITATION
+  ;; ============================================
+  ;; When opponent raises frequently with random hands, adjust strategy:
+  ;; - Call raises with medium hands (their raises don't mean strength)
+  ;; - Don't fold to aggression unless truly weak
+
+  ;; Against constantly raising opponent, call down with medium hands
+  (p maniac-call-down-medium
+     =goal>
+       isa poker-hand
+       state deciding
+       strength strength-medium
+       stage =stage
+     - stage preflop
+       opp-preflop-action raise-action  ;; They raised preflop
+     =retrieval>
+       isa opponent-behavior
+       opp-response raise-action        ;; And raising again
+     ?manual>
+       state free
+     ==>
+     !output! (EXPLOIT - Opponent is aggressive raiser - CALLING with medium hand)
+     =goal>
+       state pressing-key
+       my-action call-action
+     +manual>
+       cmd press-key
+       key "c"
+     -retrieval>)
+
+  ;; Against maniac who raised preflop and flop, still call with strong hands
+  (p maniac-call-down-strong
+     =goal>
+       isa poker-hand
+       state deciding
+       strength strength-high
+       stage =stage
+     - stage preflop
+       opp-preflop-action raise-action  ;; They raised preflop
+       opp-flop-action raise-action     ;; They raised flop too
+     =retrieval>
+       isa opponent-behavior
+       opp-response raise-action        ;; And still raising
+     ?manual>
+       state free
+     ==>
+     !output! (EXPLOIT - Opponent is maniac raising every street - CALLING with strong hand to trap)
+     =goal>
+       state pressing-key
+       my-action call-action
+     +manual>
+       cmd press-key
+       key "c"
+     -retrieval>)
+
+  ;; ============================================
   ;; IMPROVEMENT #5: Action Sequence Pattern Detection
   ;; ============================================
   ;; These detect weakness/strength patterns based on action history
@@ -615,7 +951,7 @@
        stage flop
        opp-preflop-action raise-action
        opp-action call-action          ;; Current action is passive (check = call in our model)
-     - strength low                     ;; Don't bluff with nothing
+     - strength strength-low                     ;; Don't bluff with nothing
      ?manual>
        state free
      ==>
@@ -636,7 +972,7 @@
        stage turn
        opp-preflop-action call-action
        opp-flop-action call-action
-       strength high                    ;; Only do this with strong hands
+       strength strength-high                    ;; Only do this with strong hands
      ?manual>
        state free
      ==>
@@ -648,26 +984,46 @@
        cmd press-key
        key "r")
 
-  ;; Pattern: Opponent raised preflop AND raised flop = very strong
-  ;; They're showing aggression - slow down unless we're strong
-  (p pattern-opp-raised-twice-strong-range
+  ;; Pattern: Opponent raised preflop AND raised flop = possibly strong
+  ;; BUT only fold with truly weak hands - medium hands should call vs maniacs
+  (p pattern-opp-raised-twice-we-weak
      =goal>
        isa poker-hand
        state deciding
        stage turn
        opp-preflop-action raise-action
        opp-flop-action raise-action
-     - strength high                    ;; We're not strong
+       strength strength-low                     ;; Only fold WEAK hands
      ?manual>
        state free
      ==>
-     !output! (PATTERN - Opponent raised twice - they are strong - FOLDING)
+     !output! (PATTERN - Opponent raised twice and we are weak - FOLDING)
      =goal>
        state pressing-key
        my-action fold-action
      +manual>
        cmd press-key
        key "f")
+
+  ;; Pattern: Opponent raised twice but we have medium - call to see if they're bluffing
+  (p pattern-opp-raised-twice-we-medium
+     =goal>
+       isa poker-hand
+       state deciding
+       stage turn
+       opp-preflop-action raise-action
+       opp-flop-action raise-action
+       strength strength-medium                  ;; Medium hands call
+     ?manual>
+       state free
+     ==>
+     !output! (PATTERN - Opponent raised twice but we are medium - CALLING to catch bluff)
+     =goal>
+       state pressing-key
+       my-action call-action
+     +manual>
+       cmd press-key
+       key "c")
 
   ;; Pattern: Opponent raised preflop AND raised flop, we are strong = call
   (p pattern-opp-raised-twice-we-strong
@@ -677,7 +1033,7 @@
        stage turn
        opp-preflop-action raise-action
        opp-flop-action raise-action
-       strength high                    ;; We ARE strong
+       strength strength-high                    ;; We ARE strong
      ?manual>
        state free
      ==>
@@ -698,7 +1054,7 @@
        stage flop
        my-preflop-action raise-action
        opp-preflop-action call-action
-     - strength low                     ;; Have something to back it up
+     - strength strength-low                     ;; Have something to back it up
      ?manual>
        state free
      ==>
@@ -719,7 +1075,7 @@
        opp-preflop-action call-action
        opp-flop-action call-action
        opp-turn-action call-action
-       strength high
+       strength strength-high
      ?manual>
        state free
      ==>
@@ -737,7 +1093,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength high
+       strength strength-high
        my-chips =chips
      !eval! (and (numberp =chips) (< =chips 200))  ;; < 10 BB
      ?manual>
@@ -755,7 +1111,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength medium
+       strength strength-medium
        my-chips =chips
      !eval! (and (numberp =chips) (< =chips 150))  ;; < 7.5 BB = very short
      ?manual>
@@ -775,7 +1131,7 @@
        isa poker-hand
        state deciding
        opp-chips =opp
-     - strength low
+     - strength strength-low
      !eval! (and (numberp =opp) (< =opp 150))  ;; Opponent < 7.5 BB
      ?manual>
        state free
@@ -792,7 +1148,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength high
+       strength strength-high
      ?retrieval>
        buffer failure
      ?manual>
@@ -812,7 +1168,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength medium
+       strength strength-medium
        pot-amount =pot
      !eval! (and (numberp =pot) (> =pot 100))  ;; Pot > 5 BB
      ?retrieval>
@@ -833,7 +1189,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength medium
+       strength strength-medium
        pot-amount =pot
      !eval! (and (numberp =pot) (< =pot 50))  ;; Pot < 2.5 BB
      ?retrieval>
@@ -854,7 +1210,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength medium
+       strength strength-medium
      ?retrieval>
        buffer failure
      ?manual>
@@ -872,7 +1228,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength low
+       strength strength-low
      ?retrieval>
        buffer failure
      ?manual>
@@ -890,7 +1246,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength high
+       strength strength-high
      =retrieval>
        category =any-cat
      ?manual>
@@ -909,7 +1265,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength medium
+       strength strength-medium
      =retrieval>
        category =any-cat
      ?manual>
@@ -928,7 +1284,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength low
+       strength strength-low
      =retrieval>
        category =any-cat
      ?manual>
@@ -949,7 +1305,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength high
+       strength strength-high
      =retrieval>
        isa hand-outcome
        my-strength =any-str  ;; Test a slot to avoid warning
@@ -969,7 +1325,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength medium
+       strength strength-medium
      =retrieval>
        isa hand-outcome
        my-strength =any-str  ;; Test a slot to avoid warning
@@ -989,7 +1345,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength low
+       strength strength-low
      =retrieval>
        isa hand-outcome
        my-strength =any-str  ;; Test a slot to avoid warning
@@ -1009,7 +1365,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength high
+       strength strength-high
      =retrieval>
        isa opponent-behavior
        opp-response call-action
@@ -1031,7 +1387,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength medium
+       strength strength-medium
        pot-amount =pot
      !eval! (and (numberp =pot) (> =pot 100))
      =retrieval>
@@ -1054,7 +1410,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength medium
+       strength strength-medium
      =retrieval>
        isa opponent-behavior
        opp-response call-action
@@ -1076,7 +1432,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength low
+       strength strength-low
        pot-amount =pot
      !eval! (and (numberp =pot) (> =pot 150))  ;; Very big pot
      =retrieval>
@@ -1099,7 +1455,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength low
+       strength strength-low
      =retrieval>
        isa opponent-behavior
        opp-response call-action
@@ -1140,7 +1496,7 @@
      =goal>
        isa poker-hand
        state deciding
-       strength high
+       strength strength-high
      =retrieval>
        isa opponent-behavior
        opp-response raise-action
@@ -1157,18 +1513,41 @@
        key "c"
      -retrieval>)
 
-  (p opponent-raises-we-not-strong
+  ;; FIXED: Split into medium (call) and weak (fold) to not over-fold vs aggressive opponents
+  (p opponent-raises-we-medium
      =goal>
        isa poker-hand
        state deciding
-     - strength high
+       strength strength-medium
      =retrieval>
        isa opponent-behavior
        opp-response raise-action
      ?manual>
        state free
      ==>
-     !output! (Opponent raises - we are not strong - FOLDING)
+     !output! (Opponent raises - we are medium - CALLING to catch bluffs)
+     =goal>
+       state pressing-key
+       my-action call-action
+       opp-action raise-action
+     +manual>
+       cmd press-key
+       key "c"
+     -retrieval>)
+
+  ;; Only fold truly weak hands to raises
+  (p opponent-raises-we-weak
+     =goal>
+       isa poker-hand
+       state deciding
+       strength strength-low
+     =retrieval>
+       isa opponent-behavior
+       opp-response raise-action
+     ?manual>
+       state free
+     ==>
+     !output! (Opponent raises - we are weak - FOLDING)
      =goal>
        state pressing-key
        my-action fold-action
@@ -1334,9 +1713,11 @@
      =imaginal>
        isa opponent-behavior
        stage =any-stage
+       my-action =any-my-act
+       opp-response =any-opp-resp
      - stage nil
      ==>
-     !output! (Stored stage-specific opponent behavior)
+     !output! (Stored stage-specific opponent behavior - =any-stage =any-my-act =any-opp-resp)
      -imaginal>)
 
   ;; IMPORTANT: Learn opponent-behavior in ALL cases so we can exploit tendencies
@@ -1450,19 +1831,23 @@
        state processing-feedback
        learned nil
        result lose
+       stage =stage
        my-action fold-action
+       opp-action =opp-act
        hand-category trash
      ?imaginal>
        state free
      ==>
-     !output! (Learning - Good fold with trash hand)
+     !output! (Learning - Good fold with trash hand at =stage)
      =goal>
        state done
        learned yes
      +imaginal>
        isa hand-outcome
-       my-strength low
+       stage =stage
+       my-strength strength-low
        my-action fold-action
+       opp-action =opp-act
        result win)
 
   ;; Catch-all for folds with non-trash hands (marginal/unknown)
@@ -1472,23 +1857,194 @@
        state processing-feedback
        learned nil
        result lose
+       stage =stage
        my-action fold-action
+       opp-action =opp-act
        hand-category =cat
      - hand-category trash
      ?imaginal>
        state free
      ==>
-     !output! (Learning - Folded with =cat hand)
+     !output! (Learning - Folded with =cat hand at =stage)
      =goal>
        state done
        learned yes
      +imaginal>
        isa hand-outcome
-       my-strength medium
+       stage =stage
+       my-strength strength-medium
        my-action fold-action
+       opp-action =opp-act
        result lose)
 
-  ;; CLEAR productions - each tests for a UNIQUE slot that only exists in that chunk type
+  ;; ============================================
+  ;; HAND-OUTCOME LEARNING FOR SHOWDOWNS
+  ;; ============================================
+  ;; Store what happened when we played certain hands - used by check-medium-hand-history
+
+  (p learn-hand-outcome-win-high
+     =goal>
+       isa poker-hand
+       state done
+       learned yes
+       learned-outcome nil      ;; Only learn once
+       result win
+       stage =stage
+       strength strength-high
+       my-action =my-act
+       opp-action =opp-act
+     ?imaginal>
+       state free
+     ==>
+     !output! (Learning hand outcome - WON with high hand at =stage using =my-act)
+     =goal>
+       learned-outcome yes      ;; Mark as learned
+     +imaginal>
+       isa hand-outcome
+       stage =stage
+       my-strength strength-high
+       my-action =my-act
+       opp-action =opp-act
+       result win)
+
+  (p learn-hand-outcome-win-medium
+     =goal>
+       isa poker-hand
+       state done
+       learned yes
+       learned-outcome nil      ;; Only learn once
+       result win
+       stage =stage
+       strength strength-medium
+       my-action =my-act
+       opp-action =opp-act
+     ?imaginal>
+       state free
+     ==>
+     !output! (Learning hand outcome - WON with medium hand at =stage using =my-act)
+     =goal>
+       learned-outcome yes      ;; Mark as learned
+     +imaginal>
+       isa hand-outcome
+       stage =stage
+       my-strength strength-medium
+       my-action =my-act
+       opp-action =opp-act
+       result win)
+
+  (p learn-hand-outcome-lose-high
+     =goal>
+       isa poker-hand
+       state done
+       learned yes
+       learned-outcome nil      ;; Only learn once
+       result lose
+       stage =stage
+       strength strength-high
+       my-action =my-act
+       opp-action =opp-act
+     - my-action fold-action
+     ?imaginal>
+       state free
+     ==>
+     !output! (Learning hand outcome - LOST with high hand at =stage using =my-act)
+     =goal>
+       learned-outcome yes      ;; Mark as learned
+     +imaginal>
+       isa hand-outcome
+       stage =stage
+       my-strength strength-high
+       my-action =my-act
+       opp-action =opp-act
+       result lose)
+
+  (p learn-hand-outcome-lose-medium
+     =goal>
+       isa poker-hand
+       state done
+       learned yes
+       learned-outcome nil      ;; Only learn once
+       result lose
+       stage =stage
+       strength strength-medium
+       my-action =my-act
+       opp-action =opp-act
+     - my-action fold-action
+     ?imaginal>
+       state free
+     ==>
+     !output! (Learning hand outcome - LOST with medium hand at =stage using =my-act)
+     =goal>
+       learned-outcome yes      ;; Mark as learned
+     +imaginal>
+       isa hand-outcome
+       stage =stage
+       my-strength strength-medium
+       my-action =my-act
+       opp-action =opp-act
+       result lose)
+
+  ;; ============================================
+  ;; OPPONENT SHOWDOWN MEMORY
+  ;; ============================================
+  ;; Remember what hands opponent showed down - helps predict their range
+
+  (p learn-opponent-showdown-win
+     =goal>
+       isa poker-hand
+       state done
+       result win
+       learned-showdown nil      ;; Only learn once
+       opp-rank1 =or1
+       opp-rank2 =or2
+       opp-suited =os
+       opp-action =opp-act
+     - opp-rank1 nil
+     - opp-rank2 nil
+     ?imaginal>
+       state free
+     ==>
+     !output! (Learning opponent showdown - they had =or1 =or2 suited =os and LOST)
+     =goal>
+       learned-showdown yes      ;; Mark as learned
+     +imaginal>
+       isa opponent-showdown
+       rank1 =or1
+       rank2 =or2
+       suited =os
+       opp-action-pattern =opp-act
+       result lose)
+
+  (p learn-opponent-showdown-lose
+     =goal>
+       isa poker-hand
+       state done
+       result lose
+       learned-showdown nil      ;; Only learn once
+       opp-rank1 =or1
+       opp-rank2 =or2
+       opp-suited =os
+       opp-action =opp-act
+     - opp-rank1 nil
+     - opp-rank2 nil
+     ?imaginal>
+       state free
+     ==>
+     !output! (Learning opponent showdown - they had =or1 =or2 suited =os and WON)
+     =goal>
+       learned-showdown yes      ;; Mark as learned
+     +imaginal>
+       isa opponent-showdown
+       rank1 =or1
+       rank2 =or2
+       suited =os
+       opp-action-pattern =opp-act
+       result win)
+
+  ;; ============================================
+  ;; CLEAR PRODUCTIONS
+  ;; ============================================
+  ;; Each tests for a UNIQUE slot that only exists in that chunk type
   ;; This prevents partial matching from causing the wrong production to fire
 
   (p clear-opponent-behavior
@@ -1497,9 +2053,11 @@
        state done
      =imaginal>
        isa opponent-behavior
-       opp-response =any-response   ;; Only opponent-behavior has opp-response
+       stage =any-stage            ;; Use stage slot
+       my-action =any-my-act       ;; Use my-action slot
+       opp-response =any-response  ;; Only opponent-behavior has opp-response
      ==>
-     !output! (Stored opponent behavior)
+     !output! (Stored opponent behavior - stage =any-stage my-action =any-my-act opp-response =any-response)
      -imaginal>)
 
   (p clear-hand-outcome
@@ -1508,9 +2066,28 @@
        state done
      =imaginal>
        isa hand-outcome
-       my-strength =any-strength    ;; Only hand-outcome has my-strength
+       stage =any-stage            ;; Use stage slot
+       my-strength =any-strength   ;; Only hand-outcome has my-strength
+       my-action =any-my-act       ;; Use my-action slot
+       opp-action =any-opp-act     ;; Use opp-action slot
+       result =any-result          ;; Use result slot
      ==>
-     !output! (Stored hand outcome)
+     !output! (Stored hand outcome - =any-strength =any-my-act vs =any-opp-act result =any-result)
+     -imaginal>)
+
+  (p clear-opponent-showdown
+     =goal>
+       isa poker-hand
+       state done
+     =imaginal>
+       isa opponent-showdown
+       rank1 =any-r1               ;; Use rank1 slot
+       rank2 =any-r2               ;; Use rank2 slot
+       suited =any-suited          ;; Use suited slot
+       opp-action-pattern =any     ;; Only opponent-showdown has opp-action-pattern
+       result =any-result          ;; Use result slot
+     ==>
+     !output! (Stored opponent showdown - ranks =any-r1 =any-r2 suited =any-suited result =any-result)
      -imaginal>)
 
   ;; ============================================
@@ -1527,8 +2104,14 @@
                opp-preflop-action nil opp-flop-action nil opp-turn-action nil
                my-preflop-action nil my-flop-action nil my-turn-action nil
                opp-card1 nil opp-card2 nil
+               ;; Opponent card ranks for memory
+               opp-rank1 nil opp-rank2 nil opp-suited nil
                opp-cards-attended 0
                result nil
                learned nil
+               learned-outcome nil  ;; Flag for hand-outcome learning
+               learned-showdown nil ;; Flag for opponent-showdown learning
+               ;; Position tracking
+               position nil
                my-chips nil opp-chips nil pot-amount nil))
 )

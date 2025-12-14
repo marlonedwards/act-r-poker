@@ -49,6 +49,10 @@ class PokerGame:
         self.window = None
         # Track sequence of actions for learning
         self.action_history = []  # List of (stage, player_action, opponent_action)
+        # Position tracking: 'sb' (small blind) or 'bb' (big blind)
+        # In heads-up, SB acts first preflop, BB acts first postflop
+        self.position = 'bb'  # Start as big blind (default)
+        self.hand_number = 0  # Track hand number for alternating positions
 
     def reset_deck(self):
         """Create and shuffle a new deck"""
@@ -72,6 +76,22 @@ class PokerGame:
         self.game_over = False
         self.pot = 0
         self.action_history = []
+        # Alternate position each hand
+        self.hand_number += 1
+        self.position = 'sb' if self.hand_number % 2 == 1 else 'bb'
+
+    def get_opponent_card_info(self):
+        """Get opponent card ranks and suited status for memory storage"""
+        if len(self.opponent_cards) < 2:
+            return None, None, None
+        r1 = card_rank(self.opponent_cards[0])
+        r2 = card_rank(self.opponent_cards[1])
+        # Model expects rank1 >= rank2 (high card first)
+        opp_rank1 = max(r1, r2)
+        opp_rank2 = min(r1, r2)
+        # Check if suited
+        opp_suited = 'yes' if self.opponent_cards[0][1] == self.opponent_cards[1][1] else 'no'
+        return opp_rank1, opp_rank2, opp_suited
 
     def record_action(self, stage, player_action, opponent_action):
         """Record an action in the history"""
@@ -117,12 +137,12 @@ class AlwaysFoldOpponent(Opponent):
 class TightOpponent(Opponent):
     """Opponent that only plays strong hands"""
     def __init__(self):
-        self.hand_strength = 'low'
+        self.hand_strength = 'strength-low'
 
     def evaluate_hand(self, cards, board):
         """Simple hand strength evaluation"""
         if not cards:
-            return 'low'
+            return 'strength-low'
         r1 = card_rank(cards[0])
         r2 = card_rank(cards[1]) if len(cards) > 1 else 0
 
@@ -130,22 +150,22 @@ class TightOpponent(Opponent):
         if board:
             for bc in board:
                 if card_rank(bc) == r1 or card_rank(bc) == r2:
-                    return 'high'
+                    return 'strength-high'
 
         # High cards or pair
         if r1 == r2:
-            return 'high' if r1 >= 10 else 'medium'
+            return 'strength-high' if r1 >= 10 else 'medium'
         if r1 >= 12 and r2 >= 12:
-            return 'high'
+            return 'strength-high'
         if r1 >= 10 and r2 >= 10:
-            return 'medium'
-        return 'low'
+            return 'strength-medium'
+        return 'strength-low'
 
     def decide(self, stage, board, pot, player_action):
         self.hand_strength = self.evaluate_hand(game.opponent_cards, board)
-        if self.hand_strength == 'low':
+        if self.hand_strength == 'strength-low':
             return 'fold'
-        elif self.hand_strength == 'medium':
+        elif self.hand_strength == 'strength-medium':
             return 'call'
         else:
             # player_action is key: 'r', 'c', 'f'
@@ -404,7 +424,7 @@ def evaluate_hand_strength(hole_cards, board):
     Considers made hands, draws, and position.
     """
     if not hole_cards:
-        return 'low'
+        return 'strength-low'
 
     r1 = card_rank(hole_cards[0])
     r2 = card_rank(hole_cards[1]) if len(hole_cards) > 1 else 0
@@ -425,16 +445,16 @@ def evaluate_hand_strength(hole_cards, board):
 
         # HIGH: Strong made hands
         if hand_rank >= 6:  # Flush or better
-            return 'high'
+            return 'strength-high'
         if hand_type == 'straight':
-            return 'high'
+            return 'strength-high'
         if hand_type == 'three_of_a_kind':
-            return 'high'
+            return 'strength-high'
         if hand_type == 'two_pair':
             # Two pair strength depends on the pairs
             if kickers[0] >= 10:  # Top pair is T or higher
-                return 'high'
-            return 'medium'
+                return 'strength-high'
+            return 'strength-medium'
 
         # MEDIUM: Decent made hands or strong draws
         if hand_type == 'pair':
@@ -444,75 +464,75 @@ def evaluate_hand_strength(hole_cards, board):
             max_board = max(board_ranks)
             if pair_rank >= max_board:  # Overpair or top pair
                 if pair_rank >= 10:
-                    return 'high'
-                return 'medium'
+                    return 'strength-high'
+                return 'strength-medium'
             # Second pair or pocket pair below top card
             if pair_rank >= max_board - 2:  # Within 2 ranks of top board card
-                return 'medium'
+                return 'strength-medium'
             # Any pair with decent kicker (using hole cards)
             if high_card >= 10:  # Our high card is T+
-                return 'medium'
+                return 'strength-medium'
             # Small pairs are still playable in heads-up
             if pair_rank >= 5:
-                return 'medium'
-            return 'low'
+                return 'strength-medium'
+            return 'strength-low'
 
         # Strong draws count as medium
         if flush_count >= 4:  # Flush draw
-            return 'medium'
+            return 'strength-medium'
         if straight_draw == 'oesd':  # Open-ended straight draw
-            return 'medium'
+            return 'strength-medium'
 
         # High card hands
         if hand_type == 'high_card':
             # Check if we have overcards to the board
             board_high = max(card_rank(c) for c in board)
             if high_card > board_high and low_card > board_high:
-                return 'medium'  # Two overcards
+                return 'strength-medium'  # Two overcards
             if high_card > board_high and high_card >= 12:
-                return 'medium'  # One strong overcard
+                return 'strength-medium'  # One strong overcard
             # Gutshot with overcards
             if straight_draw == 'gutshot' and high_card > board_high:
-                return 'medium'
-            return 'low'
+                return 'strength-medium'
+            return 'strength-low'
 
-        return 'low'
+        return 'strength-low'
 
     # === PREFLOP EVALUATION (more generous for heads-up) ===
 
     # HIGH: Premium hands
     if is_pair and r1 >= 9:  # 99+ is high
-        return 'high'
+        return 'strength-high'
     if high_card == 14 and low_card >= 10:  # AT+ is high
-        return 'high'
+        return 'strength-high'
     if high_card == 14 and is_suited:  # Any suited Ace is high
-        return 'high'
+        return 'strength-high'
     if high_card >= 13 and low_card >= 12:  # KQ+ is high
-        return 'high'
+        return 'strength-high'
 
     # MEDIUM: Playable hands
     if is_pair:  # Any pair is medium
-        return 'medium'
+        return 'strength-medium'
     if high_card == 14:  # Any Ace is at least medium
-        return 'medium'
+        return 'strength-medium'
     if high_card == 13 and low_card >= 8:  # K8+ is medium
-        return 'medium'
+        return 'strength-medium'
     if high_card == 13 and is_suited:  # Any suited King is medium
-        return 'medium'
+        return 'strength-medium'
     if high_card >= 10 and low_card >= 10:  # Two Broadway cards
-        return 'medium'
+        return 'strength-medium'
     if is_suited and gap <= 2 and low_card >= 5:  # Suited connectors 56s+
-        return 'medium'
+        return 'strength-medium'
     if is_suited and high_card >= 10:  # Suited with a Broadway card
-        return 'medium'
+        return 'strength-medium'
     if high_card == 12 and low_card >= 8:  # Q8+ is medium
-        return 'medium'
+        return 'strength-medium'
 
     # LOW: Marginal/trash - but still check for some playability
     if high_card >= 9 and low_card >= 7:  # Connected high cards
-        return 'medium'
+        return 'strength-medium'
 
-    return 'low'
+    return 'strength-low'
 
 # Layout coordinates matching poker.lisp
 LAYOUT = {
@@ -707,8 +727,8 @@ def run_hand(visible=False):
     is_suited = game.player_cards[0][1] == game.player_cards[1][1]
     suited_str = 'yes' if is_suited else 'no'
 
-    # DEBUG: Show strength being passed to model
-    print(f"  [DEBUG] Preflop strength: {initial_strength} for {game.player_cards} (ranks: {rank1}/{rank2}, suited: {suited_str})")
+    # DEBUG: Show strength and position being passed to model
+    print(f"  [DEBUG] Preflop strength: {initial_strength} for {game.player_cards} (ranks: {rank1}/{rank2}, suited: {suited_str}) | Position: {game.position.upper()}")
     # Set goal for model with all game state - model no longer uses visual attention for this
     # Reset learned flag to nil so model can learn this hand
     # Reset result, opp-action, opp-card1, opp-card2 for new hand
@@ -718,9 +738,13 @@ def run_hand(visible=False):
                    'rank1', rank1, 'rank2', rank2, 'suited', suited_str,
                    'my-chips', game.player_chips, 'opp-chips', game.opponent_chips,
                    'pot-amount', game.pot,
-                   'learned', 'nil', 'result', 'nil', 'opp-action', 'nil',
+                   'position', game.position,  # Position tracking
+                   'learned', 'nil', 'learned-outcome', 'nil', 'learned-showdown', 'nil',  # Learning flags
+                   'result', 'nil', 'opp-action', 'nil',
                    'opp-card1', 'nil', 'opp-card2', 'nil', 'my-action', 'nil',
                    'hand-category', 'nil',
+                   # Opponent card memory slots
+                   'opp-rank1', 'nil', 'opp-rank2', 'nil', 'opp-suited', 'nil',
                    # Action history (Improvement #5)
                    'opp-preflop-action', 'nil', 'opp-flop-action', 'nil', 'opp-turn-action', 'nil',
                    'my-preflop-action', 'nil', 'my-flop-action', 'nil', 'my-turn-action', 'nil')
@@ -889,8 +913,13 @@ def run_hand(visible=False):
         add_card_to_window(game.window, game.opponent_cards[0], 'opponent-card1')
         add_card_to_window(game.window, game.opponent_cards[1], 'opponent-card2')
 
-        # Signal model that showdown is happening - it will use visual attention here
-        actr.mod_focus('stage', 'showdown', 'state', 'waiting')
+        # Get opponent card info for memory storage
+        opp_rank1, opp_rank2, opp_suited = game.get_opponent_card_info()
+        print(f"  [DEBUG] Showdown - Opponent cards: {game.opponent_cards} (ranks: {opp_rank1}/{opp_rank2}, suited: {opp_suited})")
+
+        # Signal model that showdown is happening - include opponent card ranks for memory
+        actr.mod_focus('stage', 'showdown', 'state', 'waiting',
+                       'opp-rank1', opp_rank1, 'opp-rank2', opp_rank2, 'opp-suited', opp_suited)
 
         # Let model attend to opponent's revealed cards
         actr.run(2.0)
@@ -937,20 +966,23 @@ def run_hand(visible=False):
         'hand_strength': evaluate_hand_strength(game.player_cards, game.board),
         'went_to_showdown': went_to_showdown,
         'action_sequence': game.get_action_sequence_string(),
-        'action_history': list(game.action_history)  # Full action history
+        'action_history': list(game.action_history),  # Full action history
+        'position': game.position  # Track position for analysis
     }
 
 
 def run_session(n_hands=10, opponent_type='always-call',
-                win_limit=2000, lose_limit=100, visible=False):
+                win_limit=10000, lose_limit=100, visible=False,
+                starting_chips=5000):
     """Run a session of poker hands
 
     Args:
         n_hands: Maximum number of hands to play
         opponent_type: Type of opponent ('always-call', 'always-fold', 'tight', etc.)
-        win_limit: Stop if player reaches this many chips
+        win_limit: Stop if player reaches this many chips (default 10000 for longer sessions)
         lose_limit: Stop if player falls below this many chips
         visible: Whether to show the window
+        starting_chips: Starting chip amount (default 5000 for longer sessions)
     """
     global game
 
@@ -961,8 +993,9 @@ def run_session(n_hands=10, opponent_type='always-call',
     losses = 0
     folds = 0
 
-    game.player_chips = 1000
-    game.opponent_chips = 1000
+    game.player_chips = starting_chips
+    game.opponent_chips = starting_chips
+    game.hand_number = 0  # Reset hand number for position tracking
 
     print(f"\n=== Poker Session: {n_hands} hands vs {opponent_type} ===\n")
 
@@ -993,28 +1026,29 @@ def run_session(n_hands=10, opponent_type='always-call',
         result = run_hand(visible=visible)
         results.append(result)
 
+        pos = result.get('position', '??').upper()
         if result['result'] == 'win':
             wins += 1
-            print(f"WIN  - {result['player_cards']} vs {result['opponent_cards']} "
+            print(f"WIN  [{pos}] - {result['player_cards']} vs {result['opponent_cards']} "
                   f"Board: {result['board']} - Chips: {result['player_chips']}")
         elif result['result'] == 'lose':
             losses += 1
-            print(f"LOSE - {result['player_cards']} vs {result['opponent_cards']} "
+            print(f"LOSE [{pos}] - {result['player_cards']} vs {result['opponent_cards']} "
                   f"Board: {result['board']} - Chips: {result['player_chips']}")
         elif result['result'] == 'fold':
             folds += 1
             strength = result['hand_strength']
-            print(f"FOLD ({strength}) - {result['player_cards']} "
+            print(f"FOLD [{pos}] ({strength}) - {result['player_cards']} "
                   f"- Chips: {result['player_chips']}")
         else:
-            print(f"TIE  - Chips: {result['player_chips']}")
+            print(f"TIE  [{pos}] - Chips: {result['player_chips']}")
 
     # Summary
     print(f"\n=== Session Summary ===")
     print(f"Hands played: {len(results)}")
     print(f"Wins: {wins}, Losses: {losses}, Folds: {folds}")
     print(f"Final chips: {game.player_chips}")
-    print(f"Net profit: {game.player_chips - 1000}")
+    print(f"Net profit: {game.player_chips - starting_chips}")
 
     if results:
         win_rate = wins / len(results) * 100
@@ -1023,13 +1057,14 @@ def run_session(n_hands=10, opponent_type='always-call',
     return results
 
 
-def run_experiment(n_sessions=10, n_hands=50, opponent_type='always-call'):
+def run_experiment(n_sessions=10, n_hands=50, opponent_type='always-call', starting_chips=5000):
     """Run multiple sessions and aggregate results
 
     Args:
         n_sessions: Number of sessions to run
         n_hands: Hands per session
         opponent_type: Type of opponent to play against
+        starting_chips: Starting chip amount for each session
     """
     all_results = []
     total_profit = 0
@@ -1040,18 +1075,18 @@ def run_experiment(n_sessions=10, n_hands=50, opponent_type='always-call'):
 
     print(f"\n{'='*50}")
     print(f"POKER EXPERIMENT: {n_sessions} sessions x {n_hands} hands")
-    print(f"Opponent: {opponent_type}")
+    print(f"Opponent: {opponent_type} | Starting chips: {starting_chips}")
     print(f"{'='*50}\n")
 
     for session in range(n_sessions):
         print(f"\n--- Session {session + 1}/{n_sessions} ---")
         actr.reset()
 
-        game.player_chips = 1000
-        game.opponent_chips = 1000
+        game.player_chips = starting_chips
+        game.opponent_chips = starting_chips
 
         results = run_session(n_hands=n_hands, opponent_type=opponent_type,
-                              visible=False)
+                              visible=False, starting_chips=starting_chips)
         all_results.extend(results)
 
         for r in results:
@@ -1062,7 +1097,7 @@ def run_experiment(n_sessions=10, n_hands=50, opponent_type='always-call'):
             elif r['result'] == 'fold':
                 total_folds += 1
 
-        total_profit += (game.player_chips - 1000)
+        total_profit += (game.player_chips - starting_chips)
         total_hands += len(results)
 
     # Final summary
@@ -1078,7 +1113,7 @@ def run_experiment(n_sessions=10, n_hands=50, opponent_type='always-call'):
     return all_results
 
 
-def compare_opponents(n_hands=20):
+def compare_opponents(n_hands=20, starting_chips=5000):
     """Compare model performance against different opponent types"""
     opponent_types = ['always-call', 'always-fold', 'tight', 'aggressive', 'random']
 
@@ -1086,15 +1121,17 @@ def compare_opponents(n_hands=20):
 
     print("\n" + "="*60)
     print("OPPONENT COMPARISON EXPERIMENT")
+    print(f"Starting chips: {starting_chips}")
     print("="*60)
 
     for opp_type in opponent_types:
         print(f"\n>>> Testing against: {opp_type}")
         actr.reset()
-        game.player_chips = 1000
-        game.opponent_chips = 1000
+        game.player_chips = starting_chips
+        game.opponent_chips = starting_chips
 
-        results = run_session(n_hands=n_hands, opponent_type=opp_type, visible=False)
+        results = run_session(n_hands=n_hands, opponent_type=opp_type, visible=False,
+                              starting_chips=starting_chips)
 
         wins = sum(1 for r in results if r['result'] == 'win')
         folds = sum(1 for r in results if r['result'] == 'fold')
@@ -1104,7 +1141,7 @@ def compare_opponents(n_hands=20):
             'wins': wins,
             'folds': folds,
             'final_chips': game.player_chips,
-            'profit': game.player_chips - 1000
+            'profit': game.player_chips - starting_chips
         }
 
     # Print comparison
@@ -1377,15 +1414,233 @@ def person_session(n_hands=5, opponent_type='always-call'):
     return results
 
 
+def validate_learning(n_hands=500, block_size=50, starting_chips=25000, opponent_type='always-call'):
+    """Validate that the model is learning over time.
+
+    Runs n_hands and tracks win rates in blocks to show learning progression.
+    Uses higher starting chips to allow for longer sessions.
+
+    Args:
+        n_hands: Total number of hands to play
+        block_size: Number of hands per block for tracking
+        starting_chips: Starting chip amount (higher = longer sessions)
+        opponent_type: Type of opponent to play against
+
+    Returns:
+        Dictionary with learning statistics
+    """
+    global game
+
+    set_opponent(opponent_type)
+
+    # Use higher chip amounts
+    game.player_chips = starting_chips
+    game.opponent_chips = starting_chips
+    game.hand_number = 0
+
+    # Track results by block
+    blocks = []
+    current_block = {'wins': 0, 'losses': 0, 'folds': 0, 'hands': 0}
+    all_results = []
+
+    print(f"\n{'='*60}")
+    print(f"LEARNING VALIDATION: {n_hands} hands vs {opponent_type}")
+    print(f"Starting chips: {starting_chips} | Block size: {block_size}")
+    print(f"{'='*60}\n")
+
+    # Reset ONCE at start to clear previous state
+    actr.reset()
+    if not actr.current_model():
+        reload_model()
+
+    for hand_num in range(n_hands):
+        # Check if we can continue
+        if game.player_chips < game.big_blind:
+            print(f"\nPlayer cannot afford blind at hand {hand_num + 1}!")
+            break
+
+        result = run_hand(visible=False)
+        all_results.append(result)
+
+        # Track in current block
+        current_block['hands'] += 1
+        if result['result'] == 'win':
+            current_block['wins'] += 1
+        elif result['result'] == 'lose':
+            current_block['losses'] += 1
+        elif result['result'] == 'fold':
+            current_block['folds'] += 1
+
+        # End of block?
+        if (hand_num + 1) % block_size == 0:
+            blocks.append(current_block.copy())
+            block_num = len(blocks)
+            win_rate = current_block['wins'] / current_block['hands'] * 100 if current_block['hands'] > 0 else 0
+            print(f"Block {block_num} (hands {hand_num + 2 - block_size}-{hand_num + 1}): "
+                  f"Win rate: {win_rate:.1f}% | "
+                  f"W:{current_block['wins']} L:{current_block['losses']} F:{current_block['folds']} | "
+                  f"Chips: {game.player_chips}")
+            current_block = {'wins': 0, 'losses': 0, 'folds': 0, 'hands': 0}
+
+    # Add final partial block if any
+    if current_block['hands'] > 0:
+        blocks.append(current_block.copy())
+
+    # Calculate learning progression
+    print(f"\n{'='*60}")
+    print("LEARNING PROGRESSION ANALYSIS")
+    print(f"{'='*60}")
+
+    if len(blocks) >= 2:
+        first_half = blocks[:len(blocks)//2]
+        second_half = blocks[len(blocks)//2:]
+
+        first_wins = sum(b['wins'] for b in first_half)
+        first_hands = sum(b['hands'] for b in first_half)
+        first_rate = first_wins / first_hands * 100 if first_hands > 0 else 0
+
+        second_wins = sum(b['wins'] for b in second_half)
+        second_hands = sum(b['hands'] for b in second_half)
+        second_rate = second_wins / second_hands * 100 if second_hands > 0 else 0
+
+        improvement = second_rate - first_rate
+
+        print(f"First half win rate:  {first_rate:.1f}% ({first_wins}/{first_hands})")
+        print(f"Second half win rate: {second_rate:.1f}% ({second_wins}/{second_hands})")
+        print(f"Improvement: {improvement:+.1f}%")
+
+        if improvement > 5:
+            print("[OK] Model is LEARNING - win rate improved significantly!")
+        elif improvement > 0:
+            print("[~] Model showing slight improvement")
+        else:
+            print("[X] No clear learning detected - may need more hands or different opponent")
+
+    # Overall summary
+    total_wins = sum(1 for r in all_results if r['result'] == 'win')
+    total_losses = sum(1 for r in all_results if r['result'] == 'lose')
+    total_folds = sum(1 for r in all_results if r['result'] == 'fold')
+
+    print(f"\nOVERALL RESULTS:")
+    print(f"Total hands: {len(all_results)}")
+    print(f"Wins: {total_wins} ({total_wins/len(all_results)*100:.1f}%)")
+    print(f"Losses: {total_losses} ({total_losses/len(all_results)*100:.1f}%)")
+    print(f"Folds: {total_folds} ({total_folds/len(all_results)*100:.1f}%)")
+    print(f"Final chips: {game.player_chips}")
+    print(f"Net profit: {game.player_chips - starting_chips}")
+
+    return {
+        'blocks': blocks,
+        'total_wins': total_wins,
+        'total_losses': total_losses,
+        'total_folds': total_folds,
+        'final_chips': game.player_chips,
+        'results': all_results
+    }
+
+
+def validate_learning_all_opponents(n_hands=500, block_size=50, starting_chips=25000):
+    """Validate learning across ALL opponent types.
+
+    This is the comprehensive test to ensure the model learns against each opponent style.
+
+    Args:
+        n_hands: Number of hands per opponent
+        block_size: Block size for tracking
+        starting_chips: Starting chips (higher = longer sessions)
+
+    Returns:
+        Dictionary with results for each opponent type
+    """
+    opponent_types = ['always-call', 'always-fold', 'tight', 'aggressive', 'random']
+
+    all_results = {}
+
+    print("\n" + "="*70)
+    print("COMPREHENSIVE LEARNING VALIDATION ACROSS ALL OPPONENT TYPES")
+    print("="*70)
+
+    for opp_type in opponent_types:
+        print(f"\n{'*'*70}")
+        print(f"TESTING vs {opp_type.upper()}")
+        print(f"{'*'*70}")
+
+        results = validate_learning(
+            n_hands=n_hands,
+            block_size=block_size,
+            starting_chips=starting_chips,
+            opponent_type=opp_type
+        )
+        all_results[opp_type] = results
+
+    # Summary comparison
+    print("\n" + "="*70)
+    print("LEARNING SUMMARY ACROSS ALL OPPONENTS")
+    print("="*70)
+    print(f"{'Opponent':<15} {'Hands':<8} {'Win%':<10} {'First Half':<12} {'Second Half':<12} {'Δ':<8}")
+    print("-"*70)
+
+    for opp_type, data in all_results.items():
+        blocks = data['blocks']
+        total_hands = sum(b['hands'] for b in blocks)
+        total_wins = data['total_wins']
+        win_rate = total_wins / total_hands * 100 if total_hands > 0 else 0
+
+        if len(blocks) >= 2:
+            first_half = blocks[:len(blocks)//2]
+            second_half = blocks[len(blocks)//2:]
+
+            first_wins = sum(b['wins'] for b in first_half)
+            first_hands = sum(b['hands'] for b in first_half)
+            first_rate = first_wins / first_hands * 100 if first_hands > 0 else 0
+
+            second_wins = sum(b['wins'] for b in second_half)
+            second_hands = sum(b['hands'] for b in second_half)
+            second_rate = second_wins / second_hands * 100 if second_hands > 0 else 0
+
+            improvement = second_rate - first_rate
+
+            print(f"{opp_type:<15} {total_hands:<8} {win_rate:<10.1f} {first_rate:<12.1f} {second_rate:<12.1f} {improvement:+.1f}")
+        else:
+            print(f"{opp_type:<15} {total_hands:<8} {win_rate:<10.1f} {'N/A':<12} {'N/A':<12} {'N/A':<8}")
+
+    return all_results
+
+
 if __name__ == "__main__":
-    # Default experiment
+    # Usage:
+    #   python poker.py                         - Run 20 hands vs always-call
+    #   python poker.py 50                      - Run 50 hands vs always-call
+    #   python poker.py 50 tight                - Run 50 hands vs tight
+    #   python poker.py validate                - Run learning validation vs always-call
+    #   python poker.py validate tight          - Run learning validation vs tight
+    #   python poker.py validate-all            - Run learning validation vs ALL opponents
+
     n_hands = 20
     opponent = 'always-call'
 
     if len(sys.argv) > 1:
-        n_hands = int(sys.argv[1])
-    if len(sys.argv) > 2:
-        opponent = sys.argv[2]
-
-    print(f"Running poker experiment: {n_hands} hands vs {opponent}")
-    run_session(n_hands=n_hands, opponent_type=opponent)
+        if sys.argv[1] == 'validate':
+            # Run learning validation for single opponent
+            opp = sys.argv[2] if len(sys.argv) > 2 else 'always-call'
+            print(f"Running learning validation vs {opp}...")
+            validate_learning(n_hands=500, block_size=50, starting_chips=25000, opponent_type=opp)
+        elif sys.argv[1] == 'validate-all':
+            # Run learning validation for ALL opponents
+            print("Running comprehensive learning validation...")
+            validate_learning_all_opponents(n_hands=500, block_size=50, starting_chips=25000)
+        elif sys.argv[1] == 'compare':
+            # Run opponent comparison
+            n = int(sys.argv[2]) if len(sys.argv) > 2 else 50
+            print(f"Running opponent comparison with {n} hands each...")
+            compare_opponents(n_hands=n)
+        else:
+            # Standard session
+            n_hands = int(sys.argv[1])
+            if len(sys.argv) > 2:
+                opponent = sys.argv[2]
+            print(f"Running poker experiment: {n_hands} hands vs {opponent}")
+            run_session(n_hands=n_hands, opponent_type=opponent)
+    else:
+        print(f"Running poker experiment: {n_hands} hands vs {opponent}")
+        run_session(n_hands=n_hands, opponent_type=opponent)
