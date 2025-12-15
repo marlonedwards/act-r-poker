@@ -120,25 +120,73 @@
   ;; ============================================
   ;; OPPONENT IS A FOLDER - Exploit by raising!
   ;; ============================================
-  ;; If opponent folds a lot, raise regardless of hand strength
+  ;; If opponent folds a lot, raise with strong/medium hands
+  ;; BUT be cautious with weak hands - if they don't fold, we lose big
+  ;; This prevents "tilt" behavior against tight opponents
 
-  (p opponent-folds-exploit
+  ;; Strong hands: Always raise vs folders (value + they might call with worse)
+  (p opponent-folds-exploit-strong
      =goal>
        isa poker-hand
        state checking-opponent
+       strength strength-high
      =retrieval>
        isa opponent-pattern
        opp-response fold-action
      ?manual>
        state free
      ==>
-     !output! (EXPLOIT - Opponent folds! RAISING to steal)
+     !output! (EXPLOIT - Opponent folds and we are STRONG - RAISING!)
      =goal>
        state pressing-key
        my-action raise-action
      +manual>
        cmd press-key
        key "r"
+     -retrieval>)
+
+  ;; Medium hands: Raise vs folders (good exploitation)
+  (p opponent-folds-exploit-medium
+     =goal>
+       isa poker-hand
+       state checking-opponent
+       strength strength-medium
+     =retrieval>
+       isa opponent-pattern
+       opp-response fold-action
+     ?manual>
+       state free
+     ==>
+     !output! (EXPLOIT - Opponent folds and we are MEDIUM - RAISING to steal!)
+     =goal>
+       state pressing-key
+       my-action raise-action
+     +manual>
+       cmd press-key
+       key "r"
+     -retrieval>)
+
+  ;; Weak hands vs folders: CHECK instead of raising
+  ;; Reasoning: If they fold, we win anyway. If they DON'T fold, we're not committed.
+  ;; This prevents over-exploiting and "tilting" with trash hands.
+  (p opponent-folds-exploit-weak
+     =goal>
+       isa poker-hand
+       state checking-opponent
+       strength strength-low
+     =retrieval>
+       isa opponent-pattern
+       opp-response fold-action
+     ?manual>
+       state free
+     ==>
+     !output! (CAUTION - Opponent usually folds but we are WEAK - CHECK to see what happens)
+     =goal>
+       state pressing-key
+       my-action check-action
+     +manual>
+       cmd press-key
+       key "k"
      -retrieval>)
 
   ;; ============================================
@@ -166,18 +214,64 @@
        key "c"
      -retrieval>)
 
-  (p opponent-raises-medium
+  ;; Against raisers with MEDIUM hand: Use pot odds to decide!
+  ;; Good odds = call (opponent might be bluffing)
+  ;; Bad odds = fold (not worth the risk)
+  (p opponent-raises-medium-good-odds
      =goal>
        isa poker-hand
        state checking-opponent
        strength strength-medium
+       pot-situation odds-good    ;; Good pot odds - worth calling
      =retrieval>
        isa opponent-pattern
        opp-response raise-action
      ?manual>
        state free
      ==>
-     !output! (CAUTION - Opponent aggressive and we medium - FOLDING)
+     !output! (BLUFF CATCH - Opponent raises but pot odds good - CALLING with medium!)
+     =goal>
+       state pressing-key
+       my-action call-action
+     +manual>
+       cmd press-key
+       key "c"
+     -retrieval>)
+
+  (p opponent-raises-medium-neutral-odds
+     =goal>
+       isa poker-hand
+       state checking-opponent
+       strength strength-medium
+       pot-situation odds-neutral  ;; Neutral odds - marginal call
+     =retrieval>
+       isa opponent-pattern
+       opp-response raise-action
+     ?manual>
+       state free
+     ==>
+     !output! (MARGINAL - Opponent raises neutral odds - CALLING with medium)
+     =goal>
+       state pressing-key
+       my-action call-action
+     +manual>
+       cmd press-key
+       key "c"
+     -retrieval>)
+
+  (p opponent-raises-medium-bad-odds
+     =goal>
+       isa poker-hand
+       state checking-opponent
+       strength strength-medium
+       pot-situation odds-bad      ;; Bad pot odds - fold
+     =retrieval>
+       isa opponent-pattern
+       opp-response raise-action
+     ?manual>
+       state free
+     ==>
+     !output! (CAUTION - Opponent raises bad odds - FOLDING medium)
      =goal>
        state pressing-key
        my-action fold-action
@@ -186,18 +280,41 @@
        key "f"
      -retrieval>)
 
-  (p opponent-raises-weak
+  ;; Against raisers with WEAK hand: Usually fold but call with great odds
+  (p opponent-raises-weak-good-odds
      =goal>
        isa poker-hand
        state checking-opponent
        strength strength-low
+       pot-situation odds-good     ;; Great pot odds - bluff catch
      =retrieval>
        isa opponent-pattern
        opp-response raise-action
      ?manual>
        state free
      ==>
-     !output! (CAUTION - Opponent aggressive and we weak - FOLDING)
+     !output! (BLUFF CATCH - Opponent raises but great odds - CALLING weak!)
+     =goal>
+       state pressing-key
+       my-action call-action
+     +manual>
+       cmd press-key
+       key "c"
+     -retrieval>)
+
+  (p opponent-raises-weak-fold
+     =goal>
+       isa poker-hand
+       state checking-opponent
+       strength strength-low
+     - pot-situation odds-good     ;; Not great odds - fold
+     =retrieval>
+       isa opponent-pattern
+       opp-response raise-action
+     ?manual>
+       state free
+     ==>
+     !output! (CAUTION - Opponent raises and we weak - FOLDING)
      =goal>
        state pressing-key
        my-action fold-action
