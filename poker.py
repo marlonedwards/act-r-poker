@@ -76,9 +76,61 @@ class PokerGame:
         self.game_over = False
         self.pot = 0
         self.action_history = []
+        # Cognitive process tracking
+        self.cognitive_trace = []  # List of (stage, retrieval_type, retrieval_result, production)
         # Alternate position each hand
         self.hand_number += 1
         self.position = 'sb' if self.hand_number % 2 == 1 else 'bb'
+
+    def record_cognitive_event(self, stage, retrieval_type, retrieval_result, production):
+        """Record a cognitive event for analysis.
+
+        Args:
+            stage: 'preflop', 'flop', 'turn', 'river'
+            retrieval_type: 'opponent_pattern' or 'hand_memory'
+            retrieval_result: 'success', 'failure', 'wrong_type'
+            production: Name of production that fired
+        """
+        self.cognitive_trace.append({
+            'stage': stage,
+            'retrieval_type': retrieval_type,
+            'retrieval_result': retrieval_result,
+            'production': production
+        })
+
+    def get_pot_odds(self):
+        """Calculate pot odds category for decision making
+
+        Returns: 'odds-good' (>2:1), 'odds-neutral' (1:1-2:1), 'odds-bad' (<1:1)
+        Based on pot size vs bet size (big blind)
+        """
+        if self.pot <= 0:
+            return 'odds-neutral'
+
+        # Pot odds = pot / bet_to_call
+        # Simplified: use big_blind as standard bet size
+        bet_to_call = self.big_blind
+        pot_odds_ratio = self.pot / bet_to_call
+
+        if pot_odds_ratio >= 3:
+            return 'odds-good'      # Great odds, worth calling/betting
+        elif pot_odds_ratio >= 1.5:
+            return 'odds-neutral'   # Marginal
+        else:
+            return 'odds-bad'       # Poor odds
+
+    def get_stack_status(self):
+        """Get stack size status relative to blinds
+
+        Returns: 'stack-deep' (>50bb), 'stack-medium' (20-50bb), 'stack-short' (<20bb)
+        """
+        bb_count = self.player_chips / self.big_blind
+        if bb_count >= 50:
+            return 'stack-deep'
+        elif bb_count >= 20:
+            return 'stack-medium'
+        else:
+            return 'stack-short'
 
     def get_opponent_card_info(self):
         """Get opponent card ranks and suited status for memory storage"""
@@ -122,8 +174,12 @@ class Opponent:
         return 'call'
 
 class AlwaysCallOpponent(Opponent):
-    """Opponent that always calls"""
+    """Opponent that always calls (passive calling station)"""
     def decide(self, stage, board, pot, player_action):
+        # If player checks, we check back (nothing to call)
+        # If player raises, we call
+        if player_action == 'k':
+            return 'check'
         return 'call'
 
 class AlwaysFoldOpponent(Opponent):
@@ -577,10 +633,26 @@ def display_chips(window):
     add_text_to_window(window, f"Pot:{game.pot}", 'pot', font_size=20)
 
 def post_blinds():
-    """Post blinds at start of hand"""
-    game.pot = int(1.5 * game.big_blind)
-    game.player_chips -= game.big_blind
-    game.opponent_chips -= game.big_blind // 2
+    """Post blinds at start of hand based on position.
+
+    In heads-up poker:
+    - Small blind (SB) posts half the big blind
+    - Big blind (BB) posts the full big blind
+    - Position alternates each hand
+    """
+    sb_amount = game.big_blind // 2  # 10
+    bb_amount = game.big_blind       # 20
+
+    if game.position == 'sb':
+        # Player is small blind, opponent is big blind
+        game.player_chips -= sb_amount
+        game.opponent_chips -= bb_amount
+    else:
+        # Player is big blind, opponent is small blind
+        game.player_chips -= bb_amount
+        game.opponent_chips -= sb_amount
+
+    game.pot = sb_amount + bb_amount  # 30 total
 
 def show_feedback(window, result, outcome_text, opp_action='call'):
     """Show feedback to model after hand completes
@@ -717,49 +789,27 @@ def run_hand(visible=False):
     # Evaluate initial hand strength for preflop and signal to model
     initial_strength = evaluate_hand_strength(game.player_cards, [])
 
-    # Calculate rank1, rank2, suited for preflop hand lookup
-    r1 = card_rank(game.player_cards[0])
-    r2 = card_rank(game.player_cards[1])
-    # Model expects rank1 >= rank2 (high card first)
-    rank1 = max(r1, r2)
-    rank2 = min(r1, r2)
-    # Check if suited
-    is_suited = game.player_cards[0][1] == game.player_cards[1][1]
-    suited_str = 'yes' if is_suited else 'no'
+    # Get initial game state info
+    pot_odds = game.get_pot_odds()
+    stack_status = game.get_stack_status()
+    position = game.position  # 'sb' or 'bb'
 
-    # DEBUG: Show strength and position being passed to model
-    print(f"  [DEBUG] Preflop strength: {initial_strength} for {game.player_cards} (ranks: {rank1}/{rank2}, suited: {suited_str}) | Position: {game.position.upper()}")
-    # Set goal for model with all game state - model no longer uses visual attention for this
-    # Reset learned flag to nil so model can learn this hand
-    # Reset result, opp-action, opp-card1, opp-card2 for new hand
-    # Also reset action history slots for Improvement #5
+    # DEBUG: Show state being passed to model
+    print(f"  [DEBUG] Preflop strength: {initial_strength} for {game.player_cards}")
+    print(f"  [DEBUG] Position: {position}, Pot odds: {pot_odds}, Stack: {stack_status}")
+
+    # Set goal for model with all relevant state
+    # NOTE: Using 'seat' instead of 'position' (reserved), 'pot-situation' instead of 'pot-odds'
     actr.mod_focus('stage', 'preflop', 'state', 'waiting', 'strength', initial_strength,
-                   'card1', game.player_cards[0], 'card2', game.player_cards[1],
-                   'rank1', rank1, 'rank2', rank2, 'suited', suited_str,
-                   'my-chips', game.player_chips, 'opp-chips', game.opponent_chips,
-                   'pot-amount', game.pot,
-                   'position', game.position,  # Position tracking
-                   'learned', 'nil', 'learned-outcome', 'nil', 'learned-showdown', 'nil',  # Learning flags
-                   'result', 'nil', 'opp-action', 'nil',
-                   'opp-card1', 'nil', 'opp-card2', 'nil', 'my-action', 'nil',
-                   'hand-category', 'nil',
-                   # Opponent card memory slots
-                   'opp-rank1', 'nil', 'opp-rank2', 'nil', 'opp-suited', 'nil',
-                   # Action history (Improvement #5)
-                   'opp-preflop-action', 'nil', 'opp-flop-action', 'nil', 'opp-turn-action', 'nil',
-                   'my-preflop-action', 'nil', 'my-flop-action', 'nil', 'my-turn-action', 'nil')
+                   'my-action', 'nil', 'opp-action', 'nil',
+                   'seat', position, 'pot-situation', pot_odds, 'stack-size', stack_status,
+                   'opp-card1', 'nil', 'opp-card2', 'nil', 'opp-cards-attended', 0,
+                   'result', 'nil', 'learned', 'nil')
 
     hand_result = None
     player_folded = False
     opponent_folded = False
     opponent_action = 'call'  # Track last opponent action for learning
-
-    # Track action history for pattern detection (Improvement #5)
-    action_history = {
-        'my_preflop': None, 'opp_preflop': None,
-        'my_flop': None, 'opp_flop': None,
-        'my_turn': None, 'opp_turn': None
-    }
 
     # Game loop through stages
     stages = ['preflop', 'flop', 'turn', 'river']
@@ -776,53 +826,38 @@ def run_hand(visible=False):
             add_card_to_window(game.window, game.board[2], 'flop3')
             # Evaluate hand strength with flop
             flop_strength = evaluate_hand_strength(game.player_cards, game.board)
-            print(f"  [DEBUG] Flop strength: {flop_strength} | Board: {game.board}")
-            # Signal model with updated game state + action history
+            pot_odds = game.get_pot_odds()
+            print(f"  [DEBUG] Flop strength: {flop_strength} | Board: {game.board} | Pot odds: {pot_odds}")
+            # Signal model with updated game state
             actr.mod_focus('stage', 'flop', 'state', 'waiting', 'strength', flop_strength,
-                           'my-chips', game.player_chips, 'opp-chips', game.opponent_chips,
-                           'pot-amount', game.pot,
-                           # Pass preflop action history (Improvement #5)
-                           'opp-preflop-action', action_history['opp_preflop'] or 'nil',
-                           'my-preflop-action', action_history['my_preflop'] or 'nil')
+                          'pot-situation', pot_odds)
         elif stage == 'turn':
             game.board.append(game.deal_card())
             add_card_to_window(game.window, game.board[3], 'turn')
             # Evaluate hand strength with turn
             turn_strength = evaluate_hand_strength(game.player_cards, game.board)
-            print(f"  [DEBUG] Turn strength: {turn_strength} | Board: {game.board}")
-            # Signal model with updated game state + action history
+            pot_odds = game.get_pot_odds()
+            print(f"  [DEBUG] Turn strength: {turn_strength} | Board: {game.board} | Pot odds: {pot_odds}")
+            # Signal model with updated game state
             actr.mod_focus('stage', 'turn', 'state', 'waiting', 'strength', turn_strength,
-                           'my-chips', game.player_chips, 'opp-chips', game.opponent_chips,
-                           'pot-amount', game.pot,
-                           # Pass preflop + flop action history (Improvement #5)
-                           'opp-preflop-action', action_history['opp_preflop'] or 'nil',
-                           'my-preflop-action', action_history['my_preflop'] or 'nil',
-                           'opp-flop-action', action_history['opp_flop'] or 'nil',
-                           'my-flop-action', action_history['my_flop'] or 'nil')
+                          'pot-situation', pot_odds)
         elif stage == 'river':
             game.board.append(game.deal_card())
             add_card_to_window(game.window, game.board[4], 'river')
             # Evaluate hand strength with river
             river_strength = evaluate_hand_strength(game.player_cards, game.board)
-            print(f"  [DEBUG] River strength: {river_strength} | Board: {game.board}")
-            # Signal model with updated game state + action history
+            pot_odds = game.get_pot_odds()
+            print(f"  [DEBUG] River strength: {river_strength} | Board: {game.board} | Pot odds: {pot_odds}")
+            # Signal model with updated game state
             actr.mod_focus('stage', 'river', 'state', 'waiting', 'strength', river_strength,
-                           'my-chips', game.player_chips, 'opp-chips', game.opponent_chips,
-                           'pot-amount', game.pot,
-                           # Pass full action history (Improvement #5)
-                           'opp-preflop-action', action_history['opp_preflop'] or 'nil',
-                           'my-preflop-action', action_history['my_preflop'] or 'nil',
-                           'opp-flop-action', action_history['opp_flop'] or 'nil',
-                           'my-flop-action', action_history['my_flop'] or 'nil',
-                           'opp-turn-action', action_history['opp_turn'] or 'nil',
-                           'my-turn-action', action_history['my_turn'] or 'nil')
+                          'pot-situation', pot_odds)
 
         # Wait for model response
         actr.run(10)
 
         player_action = game.response
         # DEBUG: Show what action the model took
-        action_map = {'f': 'FOLD', 'c': 'CALL', 'r': 'RAISE', '': 'NO RESPONSE'}
+        action_map = {'f': 'FOLD', 'c': 'CALL', 'r': 'RAISE', 'k': 'CHECK', '': 'NO RESPONSE'}
         print(f"  [DEBUG] {stage}: Model action = {action_map.get(player_action, player_action)}")
 
         if player_action == 'f':
@@ -832,27 +867,42 @@ def run_hand(visible=False):
             hand_result = 'fold'
             break
 
-        # Get opponent response
+        if player_action == 'k':
+            # Check - no money added, opponent gets to act
+            opponent_action = current_opponent.decide(stage, game.board,
+                                                       game.pot, 'k')
+            # Record with opponent's actual response
+            game.record_action(stage, 'check', opponent_action)
+
+            if opponent_action == 'raise':
+                # Opponent bets, we need to respond - for now auto-call
+                # TODO: Could let model respond to bet
+                # Opponent puts in a bet
+                game.pot += game.big_blind
+                game.opponent_chips -= game.big_blind
+                # We auto-call their bet
+                game.pot += game.big_blind
+                game.player_chips -= game.big_blind
+
+            # CRITICAL: Tell model what opponent did so it can learn!
+            opp_action_chunk = f"{opponent_action}-action"
+            actr.mod_focus('opp-action', opp_action_chunk, 'my-action', 'check-action',
+                           'state', 'learning-stage')
+            actr.run(0.5)
+
+            # Continue to next stage
+            continue
+
+        # Get opponent response (for call/raise)
         opponent_action = current_opponent.decide(stage, game.board,
                                                    game.pot, player_action)
 
         # Record the action pair
         game.record_action(stage, player_action, opponent_action)
 
-        # IMPROVEMENT #5: Store action history for pattern detection
+        # Tell model what opponent did so it can learn per-stage
         opp_action_chunk = f"{opponent_action}-action"
-        my_action_chunk = {'r': 'raise-action', 'c': 'call-action', 'f': 'fold-action'}.get(player_action, 'call-action')
-        if stage == 'preflop':
-            action_history['opp_preflop'] = opp_action_chunk
-            action_history['my_preflop'] = my_action_chunk
-        elif stage == 'flop':
-            action_history['opp_flop'] = opp_action_chunk
-            action_history['my_flop'] = my_action_chunk
-        elif stage == 'turn':
-            action_history['opp_turn'] = opp_action_chunk
-            action_history['my_turn'] = my_action_chunk
-
-        # IMPROVEMENT #4: Tell model what opponent did so it can learn per-stage
+        my_action_chunk = {'r': 'raise-action', 'c': 'call-action', 'f': 'fold-action', 'k': 'check-action'}.get(player_action, 'call-action')
         actr.mod_focus('opp-action', opp_action_chunk, 'my-action', my_action_chunk,
                        'state', 'learning-stage')
         # Let model learn this stage's interaction
@@ -863,13 +913,23 @@ def run_hand(visible=False):
             hand_result = 'win'
             break
 
-        # Update pot for calls/raises
+        # Update pot for player calls/raises
         if player_action == 'r':
-            game.pot += game.big_blind * 2
+            game.pot += game.big_blind
             game.player_chips -= game.big_blind
         elif player_action == 'c':
-            game.pot += game.big_blind
+            game.pot += game.big_blind // 2
             game.player_chips -= game.big_blind // 2
+
+        # Update pot for opponent calls/raises (they must pay too!)
+        if opponent_action == 'call':
+            # Opponent matches our bet
+            game.pot += game.big_blind
+            game.opponent_chips -= game.big_blind
+        elif opponent_action == 'raise':
+            # Opponent raises - they put in more
+            game.pot += game.big_blind * 2
+            game.opponent_chips -= game.big_blind * 2
 
     # Determine outcome
     opponent_action_for_learning = 'call'  # Default
@@ -913,13 +973,11 @@ def run_hand(visible=False):
         add_card_to_window(game.window, game.opponent_cards[0], 'opponent-card1')
         add_card_to_window(game.window, game.opponent_cards[1], 'opponent-card2')
 
-        # Get opponent card info for memory storage
-        opp_rank1, opp_rank2, opp_suited = game.get_opponent_card_info()
-        print(f"  [DEBUG] Showdown - Opponent cards: {game.opponent_cards} (ranks: {opp_rank1}/{opp_rank2}, suited: {opp_suited})")
+        # Get opponent card info for display
+        print(f"  [DEBUG] Showdown - Opponent cards: {game.opponent_cards}")
 
-        # Signal model that showdown is happening - include opponent card ranks for memory
-        actr.mod_focus('stage', 'showdown', 'state', 'waiting',
-                       'opp-rank1', opp_rank1, 'opp-rank2', opp_rank2, 'opp-suited', opp_suited)
+        # Signal model that showdown is happening
+        actr.mod_focus('stage', 'showdown', 'state', 'waiting')
 
         # Let model attend to opponent's revealed cards
         actr.run(2.0)
@@ -967,7 +1025,8 @@ def run_hand(visible=False):
         'went_to_showdown': went_to_showdown,
         'action_sequence': game.get_action_sequence_string(),
         'action_history': list(game.action_history),  # Full action history
-        'position': game.position  # Track position for analysis
+        'position': game.position,  # Track position for analysis
+        'cognitive_trace': list(game.cognitive_trace) if hasattr(game, 'cognitive_trace') else []
     }
 
 
@@ -1539,6 +1598,391 @@ def validate_learning(n_hands=500, block_size=50, starting_chips=25000, opponent
     }
 
 
+def debug_learning(n_hands=20, opponent_type='always-call', starting_chips=5000):
+    """Debug the model's learning by tracing memory retrievals.
+
+    This function shows EXACTLY what the model is learning and retrieving:
+    - What opponent patterns it has stored
+    - What hand memories it retrieves when deciding
+    - How decisions are being made
+
+    Args:
+        n_hands: Number of hands to trace (default 20)
+        opponent_type: Opponent type
+        starting_chips: Starting chips
+    """
+    global game
+
+    set_opponent(opponent_type)
+    game.player_chips = starting_chips
+    game.opponent_chips = starting_chips
+    game.hand_number = 0
+
+    print(f"\n{'='*70}")
+    print(f"LEARNING DEBUG: {n_hands} hands vs {opponent_type}")
+    print(f"{'='*70}\n")
+
+    # Reset and enable detailed tracing
+    actr.reset()
+    if not actr.current_model():
+        reload_model()
+
+    # Enable trace output
+    actr.set_parameter_value(':v', True)
+    actr.set_parameter_value(':trace-detail', 'high')
+
+    results = []
+
+    for hand_num in range(n_hands):
+        if game.player_chips < game.big_blind:
+            print(f"Cannot afford blind!")
+            break
+
+        print(f"\n{'='*70}")
+        print(f"HAND {hand_num + 1}")
+        print(f"{'='*70}")
+
+        # Before hand: Show current memory state
+        print("\n--- MEMORY STATE BEFORE HAND ---")
+        dm_chunks = actr.dm()
+        if dm_chunks:
+            opp_patterns = [c for c in dm_chunks if 'OPPONENT-PATTERN' in str(c).upper()]
+            hand_memories = [c for c in dm_chunks if 'HAND-MEMORY' in str(c).upper()]
+            print(f"Opponent patterns stored: {len(opp_patterns)}")
+            print(f"Hand memories stored: {len(hand_memories)}")
+
+            # Show some details
+            if opp_patterns:
+                print("  Recent opponent patterns:")
+                for chunk in opp_patterns[-5:]:
+                    chunk_str = actr.chunk_slot_value(chunk, 'opp-response')
+                    print(f"    - {chunk}: opp-response={chunk_str}")
+
+        print("\n--- RUNNING HAND (watch for MEMORY/EXPLOIT outputs) ---")
+        result = run_hand(visible=False)
+        results.append(result)
+
+        # Summary
+        action_map = {'f': 'FOLD', 'c': 'CALL', 'r': 'RAISE', '': 'NO ACTION'}
+        print(f"\n--- HAND {hand_num + 1} SUMMARY ---")
+        print(f"Cards: {result['player_cards']} | Strength: {result['hand_strength']}")
+        print(f"Action: {action_map.get(result['player_action'], result['player_action'])}")
+        print(f"Result: {result['result'].upper()}")
+        print(f"Chips: {result['player_chips']}")
+
+    # Final memory state
+    print(f"\n{'='*70}")
+    print("FINAL MEMORY STATE")
+    print(f"{'='*70}")
+
+    dm_chunks = actr.dm()
+    if dm_chunks:
+        # Count by type
+        opp_fold = 0
+        opp_call = 0
+        opp_raise = 0
+        win_raise = 0
+        win_call = 0
+        lose_raise = 0
+        lose_call = 0
+
+        for chunk in dm_chunks:
+            chunk_type = actr.chunk_slot_value(chunk, 'isa')
+            if chunk_type == 'opponent-pattern':
+                resp = actr.chunk_slot_value(chunk, 'opp-response')
+                if resp == 'fold-action':
+                    opp_fold += 1
+                elif resp == 'call-action':
+                    opp_call += 1
+                elif resp == 'raise-action':
+                    opp_raise += 1
+            elif chunk_type == 'hand-memory':
+                action = actr.chunk_slot_value(chunk, 'action')
+                outcome = actr.chunk_slot_value(chunk, 'outcome')
+                if outcome == 'win':
+                    if action == 'raise-action':
+                        win_raise += 1
+                    elif action == 'call-action':
+                        win_call += 1
+                elif outcome == 'lose':
+                    if action == 'raise-action':
+                        lose_raise += 1
+                    elif action == 'call-action':
+                        lose_call += 1
+
+        print(f"\nOPPONENT PATTERN MEMORIES:")
+        print(f"  Fold responses: {opp_fold}")
+        print(f"  Call responses: {opp_call}")
+        print(f"  Raise responses: {opp_raise}")
+
+        print(f"\nHAND OUTCOME MEMORIES:")
+        print(f"  Win by raising: {win_raise}")
+        print(f"  Win by calling: {win_call}")
+        print(f"  Lose by raising: {lose_raise}")
+        print(f"  Lose by calling: {lose_call}")
+
+        # Predict what model should do based on memories
+        if opp_fold > opp_call + opp_raise:
+            print(f"\n[PREDICTION] Model should EXPLOIT by raising (opponent folds a lot)")
+        elif opp_raise > opp_call:
+            print(f"\n[PREDICTION] Model should be CAUTIOUS (opponent is aggressive)")
+        else:
+            print(f"\n[PREDICTION] Model should use hand-strength based decisions")
+
+    # Turn off detailed tracing
+    actr.set_parameter_value(':trace-detail', 'low')
+
+    return results
+
+
+def get_ideal_action_visible_info(strength, opponent_type):
+    """Get ideal action based ONLY on visible information.
+
+    This is what a rational player should do given:
+    - Their hand strength (which they can see)
+    - The opponent type (which they can observe over time)
+
+    NOT based on:
+    - Opponent's actual cards (hidden information)
+    - Whether they would actually win (unknown until showdown)
+    """
+    # Against always-call: never bluff, value bet strong hands
+    if opponent_type == 'always-call':
+        if strength == 'strength-high':
+            return 'raise'  # Value bet strong hands
+        elif strength == 'strength-medium':
+            return 'call'   # Don't raise without strong hand, but don't fold
+        else:
+            return 'fold'   # Don't bluff a calling station
+
+    # Against always-fold: bluff everything!
+    elif opponent_type == 'always-fold':
+        return 'raise'  # Raise everything, they'll fold
+
+    # Against tight: can bluff more, value bet strong
+    elif opponent_type == 'tight':
+        if strength == 'strength-high':
+            return 'raise'
+        elif strength == 'strength-medium':
+            return 'call'  # Be careful, if they play back they have it
+        else:
+            return 'raise'  # Can bluff weak hands
+
+    # Against aggressive: trap with strong, fold weak
+    elif opponent_type == 'aggressive':
+        if strength == 'strength-high':
+            return 'call'   # Trap, let them bluff
+        elif strength == 'strength-medium':
+            return 'fold'   # Don't get blown off medium hands? Actually call
+        else:
+            return 'fold'
+
+    # Against random: play straightforward
+    else:
+        if strength == 'strength-high':
+            return 'raise'
+        elif strength == 'strength-medium':
+            return 'call'
+        else:
+            return 'fold'
+
+
+def analyze_model_vs_ideal(results, opponent_type):
+    """Analyze how well model plays vs ideal strategy based on VISIBLE info.
+
+    This compares model actions to what a rational player should do given
+    only the information they can see (hand strength + opponent tendencies).
+    """
+    matches = 0
+    total = 0
+
+    by_strength = {
+        'strength-high': {'match': 0, 'total': 0, 'actions': []},
+        'strength-medium': {'match': 0, 'total': 0, 'actions': []},
+        'strength-low': {'match': 0, 'total': 0, 'actions': []},
+    }
+
+    action_map = {'r': 'raise', 'c': 'call', 'f': 'fold'}
+
+    for r in results:
+        strength = r['hand_strength']
+        model_action = action_map.get(r['player_action'], r['player_action'])
+        ideal_action = get_ideal_action_visible_info(strength, opponent_type)
+
+        if strength in by_strength:
+            by_strength[strength]['total'] += 1
+            by_strength[strength]['actions'].append(model_action)
+
+            if model_action == ideal_action:
+                matches += 1
+                by_strength[strength]['match'] += 1
+
+            total += 1
+
+    print(f"\n{'='*60}")
+    print(f"MODEL vs IDEAL (based on VISIBLE information)")
+    print(f"Opponent: {opponent_type}")
+    print(f"{'='*60}")
+
+    if total > 0:
+        print(f"\nOverall match rate: {matches}/{total} ({matches/total*100:.1f}%)")
+
+    print(f"\nBy hand strength:")
+    for strength, data in by_strength.items():
+        if data['total'] > 0:
+            rate = data['match'] / data['total'] * 100
+            ideal = get_ideal_action_visible_info(strength, opponent_type)
+
+            # Count actual actions
+            action_counts = {}
+            for a in data['actions']:
+                action_counts[a] = action_counts.get(a, 0) + 1
+
+            print(f"\n  {strength}:")
+            print(f"    Ideal action: {ideal.upper()}")
+            print(f"    Model actions: {action_counts}")
+            print(f"    Match rate: {data['match']}/{data['total']} ({rate:.1f}%)")
+
+    return {
+        'match_rate': matches / total if total > 0 else 0,
+        'by_strength': by_strength
+    }
+
+
+def boost_learning():
+    """Adjust ACT-R parameters to accelerate learning for debugging.
+
+    This makes the model:
+    - Learn faster (lower BLL decay)
+    - Remember recent experiences better
+    - Be more consistent in retrievals (lower noise)
+
+    Call this at start of session to see learning effects more quickly.
+    """
+    # More aggressive base-level learning (recent memories decay slower)
+    actr.set_parameter_value(':bll', 0.3)  # Was 0.5, lower = slower decay
+
+    # Lower activation noise = more consistent retrievals
+    actr.set_parameter_value(':ans', 0.2)  # Was 0.3
+
+    # Lower retrieval threshold = retrieve more easily
+    actr.set_parameter_value(':rt', -3.0)  # Was -2.0
+
+    # Higher partial matching penalty = stricter matching
+    actr.set_parameter_value(':mp', 3.0)  # Was 2.0
+
+    print("[BOOST] Learning parameters adjusted for faster learning:")
+    print("  :bll 0.3 (slower decay)")
+    print("  :ans 0.2 (more consistent)")
+    print("  :rt -3.0 (easier retrieval)")
+    print("  :mp 3.0 (stricter matching)")
+
+
+def show_chunk_activations():
+    """Show activation levels of all chunks in declarative memory.
+
+    This is KEY for debugging - shows which memories are most likely to be retrieved.
+    Higher activation = more likely to be retrieved.
+    """
+    dm_chunks = actr.dm()
+    if not dm_chunks:
+        print("No chunks in declarative memory")
+        return
+
+    print(f"\n{'='*70}")
+    print("CHUNK ACTIVATIONS (higher = more likely to retrieve)")
+    print(f"{'='*70}\n")
+
+    # Get activations for each chunk
+    activations = []
+    for chunk in dm_chunks:
+        # Get chunk details
+        chunk_type = actr.chunk_slot_value(chunk, 'isa')
+        activation = actr.sdp(chunk, ':last-retrieval-activation')
+
+        # Build description based on type
+        if chunk_type == 'opponent-pattern':
+            resp = actr.chunk_slot_value(chunk, 'opp-response')
+            desc = f"OPP: {resp}"
+        elif chunk_type == 'hand-memory':
+            strength = actr.chunk_slot_value(chunk, 'strength')
+            action = actr.chunk_slot_value(chunk, 'action')
+            outcome = actr.chunk_slot_value(chunk, 'outcome')
+            desc = f"HAND: {strength} + {action} -> {outcome}"
+        else:
+            desc = f"{chunk_type}"
+
+        # Get reference count (number of times created/merged)
+        refs = actr.sdp(chunk, ':references')
+
+        activations.append({
+            'chunk': chunk,
+            'type': chunk_type,
+            'desc': desc,
+            'activation': activation[0] if activation else 'N/A',
+            'references': refs[0] if refs else 0
+        })
+
+    # Sort by type then activation
+    opp_chunks = [a for a in activations if a['type'] == 'opponent-pattern']
+    hand_chunks = [a for a in activations if a['type'] == 'hand-memory']
+
+    print("OPPONENT PATTERNS:")
+    for a in sorted(opp_chunks, key=lambda x: x['references'] if isinstance(x['references'], (int, float)) else 0, reverse=True)[:10]:
+        print(f"  {a['desc']:<30} refs={a['references']}")
+
+    print("\nHAND MEMORIES (top 15):")
+    for a in sorted(hand_chunks, key=lambda x: x['references'] if isinstance(x['references'], (int, float)) else 0, reverse=True)[:15]:
+        print(f"  {a['desc']:<45} refs={a['references']}")
+
+    # Summary
+    print(f"\nTOTAL: {len(opp_chunks)} opponent patterns, {len(hand_chunks)} hand memories")
+
+
+def quick_debug(n_hands=10):
+    """Quick debug run - 10 hands with memory trace.
+
+    Use this to quickly see if learning is working:
+    - Shows memory state before/after
+    - Shows what decisions are being made
+    - Analyzes vs ideal strategy
+    """
+    print("\n" + "="*70)
+    print("QUICK DEBUG - 10 hands with full trace")
+    print("="*70)
+
+    # Reset fresh
+    actr.reset()
+    if not actr.current_model():
+        reload_model()
+
+    # Boost learning for faster feedback
+    boost_learning()
+
+    # Show initial state
+    print("\n--- INITIAL MEMORY STATE ---")
+    show_chunk_activations()
+
+    # Run hands
+    results = []
+    for i in range(n_hands):
+        print(f"\n--- Hand {i+1} ---")
+        result = run_hand(visible=False)
+        results.append(result)
+
+        action_map = {'f': 'FOLD', 'c': 'CALL', 'r': 'RAISE'}
+        print(f"  {result['player_cards']} ({result['hand_strength']}) -> {action_map.get(result['player_action'], '?')} -> {result['result'].upper()}")
+
+    # Show final state
+    print("\n--- FINAL MEMORY STATE ---")
+    show_chunk_activations()
+
+    # Analyze
+    analyze_model_vs_ideal(results, 'always-call')
+
+    return results
+
+
 def validate_learning_all_opponents(n_hands=500, block_size=50, starting_chips=25000):
     """Validate learning across ALL opponent types.
 
@@ -1615,6 +2059,10 @@ if __name__ == "__main__":
     #   python poker.py validate                - Run learning validation vs always-call
     #   python poker.py validate tight          - Run learning validation vs tight
     #   python poker.py validate-all            - Run learning validation vs ALL opponents
+    #   python poker.py person                  - Interactive visual play (1 hand)
+    #   python poker.py person tight            - Interactive visual play vs tight
+    #   python poker.py person-session 10       - Interactive session (10 hands)
+    #   python poker.py person-session 10 tight - Interactive session vs tight
 
     n_hands = 20
     opponent = 'always-call'
@@ -1634,6 +2082,17 @@ if __name__ == "__main__":
             n = int(sys.argv[2]) if len(sys.argv) > 2 else 50
             print(f"Running opponent comparison with {n} hands each...")
             compare_opponents(n_hands=n)
+        elif sys.argv[1] == 'person':
+            # Interactive visual play (single hand)
+            opp = sys.argv[2] if len(sys.argv) > 2 else 'always-call'
+            print(f"Starting interactive play vs {opp}...")
+            person(opponent_type=opp)
+        elif sys.argv[1] == 'person-session':
+            # Interactive visual play (multiple hands)
+            n = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+            opp = sys.argv[3] if len(sys.argv) > 3 else 'always-call'
+            print(f"Starting {n}-hand session vs {opp}...")
+            person_session(n_hands=n, opponent_type=opp)
         else:
             # Standard session
             n_hands = int(sys.argv[1])
